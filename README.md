@@ -1,4 +1,4 @@
-# Home Assistant SMS Notification via Asterisk AMI DongleSendSMS
+# Home Assistant SMS Notification via Asterisk AMI DongleSendSMS/USSD
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 
@@ -52,6 +52,7 @@ Copy `custom_components/asterisk_dongle_sms/` contents from repo into `custom_co
       port: 5038 # Asterisk AMI port
       user: smart-home # Asterisk AMI user name
       password: your_password # Asterisk AMI user password
+      dngtype: sms #sms for sms, ussd for ussd
   ```
 
 5. Add [automation](https://home-assistant.io/docs/automation/action/).
