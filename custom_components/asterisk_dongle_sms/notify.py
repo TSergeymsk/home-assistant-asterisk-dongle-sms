@@ -84,7 +84,7 @@ class AsteriskNotificationService(BaseNotificationService):
                 action = SimpleAction(
                     'DongleSendUSSD',
                     Device=self._dongle,
-                    Code=message,
+                    USSD=message,
                 )
             else:
                 _LOGGER.error("Unknown dongle type: %s", self._dngtype)
