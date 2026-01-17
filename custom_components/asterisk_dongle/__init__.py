@@ -191,43 +191,38 @@ async def _create_dongle_device(hass: HomeAssistant, entry: ConfigEntry, device_
 def _parse_devices_response(response: str) -> list[dict[str, Any]]:
     """Парсинг ответа 'dongle show devices'."""
     devices = []
-    
-    # Ищем блок с выводом команды
-    if "Command output follows" not in response:
-        _LOGGER.warning("No command output found in response")
-        return devices
-    
-    # Извлекаем только блок вывода
     lines = response.split('\n')
-    in_output = False
-    output_lines = []
-    
+    in_output_block = False
+
     for line in lines:
-        if "Command output follows" in line:
-            in_output = True
+        line = line.strip()
+
+        # Начало блока с данными может быть обозначено по-разному
+        if "Command output follows" in line or "Output:" in line:
+            in_output_block = True
+            # Пропускаем заголовок, если он в следующей строке
             continue
-        if in_output and line.strip() == "":
+
+        if not in_output_block:
+            continue
+
+        # Конец блока данных
+        if line == "" or line.startswith("--END COMMAND--"):
             break
-        if in_output:
-            output_lines.append(line.strip())
-    
-    # Парсим каждую строку с данными
-    for line in output_lines:
-        if not line or line.startswith("---"):
+
+        # Парсим строку с данными, пропуская разделители
+        if line.startswith("---") or not line:
             continue
-            
-        # Разбиваем строку на части, объединяя длинные поля
-        # Формат: dongleX group state rssi mode submode provider model firmware imei imsi number
+
+        # Разделяем строку по пробелам, но объединяем многословные названия провайдеров
         parts = re.split(r'\s+', line)
-        
         if len(parts) >= 10:
-            # Объединяем поля провайдера, если есть пробелы
+            # Провайдер может состоять из нескольких слов, объединяем их
             if len(parts) > 12:
-                # Провайдер может состоять из нескольких слов
-                provider_parts = parts[6:-(len(parts)-12)]
+                provider_parts = parts[6:-(len(parts) - 12)]
                 provider = " ".join(provider_parts)
-                parts = parts[:6] + [provider] + parts[-(len(parts)-12):]
-            
+                parts = parts[:6] + [provider] + parts[-(len(parts) - 12):]
+
             device = {
                 ATTR_DONGLE_ID: parts[0],
                 "group": parts[1] if len(parts) > 1 else "",
@@ -245,9 +240,8 @@ def _parse_devices_response(response: str) -> list[dict[str, Any]]:
             devices.append(device)
         else:
             _LOGGER.debug("Skipping line (not enough parts): %s", line)
-    
-    return devices
 
+    return devices
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Выгрузка конфигурационной записи."""
