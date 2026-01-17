@@ -82,7 +82,7 @@ For each detected dongle, the integration creates:
 - **Firmware**: Device firmware version
 
 ### Sensor
-- **Entity ID**: `sensor.dongle_<IMEI>_cell_signal`
+- **Entity ID**: `sensor.cell_signal_<IMEI>`
 - **Name**: `Cell Signal <IMEI>`
 - **Attributes**:
   - Signal strength (dBm)
