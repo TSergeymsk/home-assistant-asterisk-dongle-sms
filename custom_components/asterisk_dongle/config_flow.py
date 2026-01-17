@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from typing import Any
 
 import voluptuous as vol
@@ -28,8 +29,10 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 )
 
 
-async def validate_connection(data: dict[str, Any]) -> dict[str, Any]:
-    """Проверка подключения к AMI."""
+def validate_connection(data: dict[str, Any]) -> dict[str, Any]:
+    """Проверка подключения к AMI (синхронная функция)."""
+    _LOGGER.debug("Validating connection to %s:%s", data["host"], data["port"])
+    
     try:
         # Создаем временный менеджер для проверки
         manager = AsteriskManager(
@@ -40,22 +43,48 @@ async def validate_connection(data: dict[str, Any]) -> dict[str, Any]:
         )
         
         # Пробуем выполнить простую команду
+        _LOGGER.debug("Sending test command...")
         response = manager.send_command("core show version")
-        if not response or "Response: Error" in response:
-            raise CannotConnect
-            
-        return {"title": f"Asterisk AMI ({data['host']})"}
         
+        _LOGGER.debug("Response received: %s", response[:200] if response else "None")
+        
+        if not response:
+            raise CannotConnect("No response from server")
+            
+        if "Response: Error" in response:
+            # Парсим сообщение об ошибке
+            for line in response.split('\n'):
+                if 'Message:' in line:
+                    error_msg = line.split('Message:', 1)[1].strip()
+                    _LOGGER.error("AMI error: %s", error_msg)
+                    raise InvalidAuth(error_msg)
+            raise InvalidAuth("Authentication failed")
+        
+        # Проверяем успешный ответ
+        if "Response: Success" not in response and "Asterisk" not in response:
+            raise CannotConnect("Unexpected response format")
+        
+        _LOGGER.debug("Connection validated successfully")
+        return {"title": f"Asterisk AMI ({data['host']}:{data['port']})"}
+        
+    except socket.timeout:
+        _LOGGER.error("Connection timeout")
+        raise CannotConnect("Connection timeout")
+    except ConnectionRefusedError:
+        _LOGGER.error("Connection refused")
+        raise CannotConnect("Connection refused")
+    except socket.gaierror as e:
+        _LOGGER.error("Invalid hostname or IP: %s", e)
+        raise CannotConnect("Invalid hostname or IP address")
     except Exception as e:
-        _LOGGER.error("Connection validation failed: %s", e)
-        raise CannotConnect from e
+        _LOGGER.exception("Unexpected error during validation: %s", str(e))
+        raise CannotConnect(f"Unexpected error: {str(e)}")
 
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Конфигурационный поток для Asterisk Dongle."""
 
     VERSION = 1
-    CONNECTION_CLASS = config_entries.CONN_CLASS_LOCAL_POLL
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -65,14 +94,14 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         
         if user_input is not None:
             try:
-                # Проверяем подключение
+                # Проверяем подключение в отдельном потоке
                 info = await self.hass.async_add_executor_job(
                     validate_connection, user_input
                 )
                 
                 # Создаем уникальный ID на основе хоста и порта
                 await self.async_set_unique_id(
-                    f"{user_input['host']}:{user_input['port']}"
+                    f"asterisk_dongle_{user_input['host']}:{user_input['port']}"
                 )
                 self._abort_if_unique_id_configured()
                 
@@ -82,13 +111,17 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     data=user_input
                 )
                 
-            except CannotConnect:
+            except CannotConnect as err:
+                _LOGGER.error("Cannot connect: %s", err)
                 errors["base"] = "cannot_connect"
-            except Exception:
-                _LOGGER.exception("Unexpected error")
+            except InvalidAuth as err:
+                _LOGGER.error("Invalid auth: %s", err)
+                errors["base"] = "invalid_auth"
+            except Exception as err:
+                _LOGGER.exception("Unexpected error: %s", err)
                 errors["base"] = "unknown"
         
-        # Показываем форму с ошибками или впервые
+        # Показываем форму
         return self.async_show_form(
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
@@ -101,3 +134,7 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 class CannotConnect(HomeAssistantError):
     """Ошибка подключения к серверу."""
+
+
+class InvalidAuth(HomeAssistantError):
+    """Ошибка аутентификации."""
