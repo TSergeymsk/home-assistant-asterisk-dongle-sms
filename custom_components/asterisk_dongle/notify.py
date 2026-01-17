@@ -5,10 +5,13 @@ import logging
 import shlex
 from typing import Any
 
+import voluptuous as vol
+
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers import config_validation as cv
 
 from .const import (
     DOMAIN,
@@ -18,15 +21,25 @@ from .const import (
     ATTR_DONGLE_ID,
     SIGNAL_DEVICE_DISCOVERED,
     SIGNAL_DEVICE_REMOVED,
+    ATTR_NUMBER,
+    ATTR_MESSAGE,
+    ATTR_USSD_CODE,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 SERVICE_SMS = "sms"
 SERVICE_USSD = "ussd"
-ATTR_NUMBER = "number"
-ATTR_MESSAGE = "message"
-ATTR_USSD_CODE = "ussd_code"
+
+# Схемы валидации для сервисов
+SMS_SERVICE_SCHEMA = vol.Schema({
+    vol.Required(ATTR_NUMBER): cv.string,
+    vol.Required(ATTR_MESSAGE): cv.string,
+})
+
+USSD_SERVICE_SCHEMA = vol.Schema({
+    vol.Required(ATTR_USSD_CODE): cv.string,
+})
 
 
 async def async_setup_entry(
@@ -82,18 +95,9 @@ async def _create_notify_services(
         number = call.data.get(ATTR_NUMBER)
         message = call.data.get(ATTR_MESSAGE)
         
-        if not number:
-            _LOGGER.error("Number is required for SMS")
-            return
-        
-        if not message:
-            _LOGGER.error("Message is required for SMS")
-            return
-        
-        # Экранируем специальные символы в сообщении
-        safe_message = shlex.quote(message)
-        
-        command = f"dongle sms {dongle_id} {number} {safe_message}"
+        # Создаем команду для отправки SMS
+        # Формат: dongle sms <device> <number> <message>
+        command = f"dongle sms {dongle_id} {number} {shlex.quote(message)}"
         _LOGGER.debug("Sending SMS command: %s", command)
         
         response = await hass.async_add_executor_job(manager.send_command, command)
@@ -102,6 +106,9 @@ async def _create_notify_services(
             _LOGGER.error("No response for SMS command to %s", dongle_id)
             return
             
+        # Логируем полный ответ для отладки
+        _LOGGER.debug("SMS command response: %s", response)
+        
         if "Response: Error" in response:
             # Парсим ошибку
             error_msg = "Unknown error"
@@ -110,6 +117,7 @@ async def _create_notify_services(
                     error_msg = line.split('Message:', 1)[1].strip()
                     break
             _LOGGER.error("Failed to send SMS via %s: %s", dongle_id, error_msg)
+            # Можно добавить уведомление об ошибке в Home Assistant
         else:
             _LOGGER.info("SMS sent to %s via %s", number, dongle_id)
     
@@ -118,14 +126,9 @@ async def _create_notify_services(
         """Обработчик сервиса отправки USSD."""
         ussd_code = call.data.get(ATTR_USSD_CODE)
         
-        if not ussd_code:
-            _LOGGER.error("USSD code is required")
-            return
-        
-        # USSD код должен быть в кавычках
-        safe_ussd_code = shlex.quote(ussd_code)
-        
-        command = f"dongle ussd {dongle_id} {safe_ussd_code}"
+        # Важно: USSD код должен быть без кавычек, так как AMI обрабатывает команду
+        # Формат: dongle ussd <device> <code>
+        command = f"dongle ussd {dongle_id} {ussd_code}"
         _LOGGER.debug("Sending USSD command: %s", command)
         
         response = await hass.async_add_executor_job(manager.send_command, command)
@@ -134,6 +137,9 @@ async def _create_notify_services(
             _LOGGER.error("No response for USSD command to %s", dongle_id)
             return
             
+        # Логируем полный ответ для отладки
+        _LOGGER.debug("USSD command response: %s", response)
+        
         if "Response: Error" in response:
             # Парсим ошибку
             error_msg = "Unknown error"
@@ -144,20 +150,24 @@ async def _create_notify_services(
             _LOGGER.error("Failed to send USSD via %s: %s", dongle_id, error_msg)
         else:
             _LOGGER.info("USSD request sent via %s: %s", dongle_id, ussd_code)
+            
+            # Дополнительно: для USSD можно получить ответ через отдельную команду
+            # dongle show device <device> в течение нескольких секунд после отправки
+            # Но это требует реализации асинхронного ожидания ответа
     
-    # Регистрируем сервисы в Home Assistant
+    # Регистрируем сервисы в Home Assistant с схемами валидации
     hass.services.async_register(
         domain="notify",
         service=f"sms_{imei}",
         service_func=async_sms_service,
-        schema=None,  # Можно добавить схему валидации позже
+        schema=SMS_SERVICE_SCHEMA,
     )
     
     hass.services.async_register(
         domain="notify",
         service=f"ussd_{imei}",
         service_func=async_ussd_service,
-        schema=None,
+        schema=USSD_SERVICE_SCHEMA,
     )
     
     _LOGGER.info("Created notify services for device %s (IMEI: %s)", dongle_id, imei)
