@@ -179,22 +179,12 @@ async def _create_dongle_device(hass: HomeAssistant, entry: ConfigEntry, device_
     
     # Определяем производителя по модели
     model = device_info.get("model", "").upper()
-    manufacturer = "Huawei"  # По умолчанию Huawei для большинства донглов
-    
-    if "ZTE" in model or model.startswith("ZTE"):
-        manufacturer = "ZTE"
-    elif "SIERRA" in model:
-        manufacturer = "Sierra Wireless"
-    elif "NOKIA" in model:
-        manufacturer = "Nokia"
-    elif "ALCATEL" in model:
-        manufacturer = "Alcatel"
     
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, imei)},
         name=f"Dongle {imei}",  # Имя устройства: Dongle <IMEI>
-        manufacturer=manufacturer,
+        manufacturer = device_info.get("manufacturer", "Unknown"),
         model=device_info.get("model", "Unknown"),
         sw_version=device_info.get("firmware", "Unknown"),
         via_device=(DOMAIN, entry.entry_id),

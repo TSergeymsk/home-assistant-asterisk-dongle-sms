@@ -11,6 +11,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers import device_registry as dr
 
 from .const import (
     DOMAIN,
@@ -120,6 +121,7 @@ class AsteriskDongleSignalSensor(SensorEntity):
         self._attr_native_value = None
         self._attributes = {}
         self._available = True
+        self._manufacturer = "Unknown"  # Будет обновлено при первом обновлении
         
         # История обновлений
         self._last_update = None
@@ -129,23 +131,10 @@ class AsteriskDongleSignalSensor(SensorEntity):
         """Возвращает информацию об устройстве."""
         imei = self._device_info[ATTR_IMEI]
         
-        # Определяем производителя по модели
-        model = self._device_info.get("model", "").upper()
-        manufacturer = "Huawei"  # По умолчанию Huawei для большинства донглов
-        
-        if "ZTE" in model or model.startswith("ZTE"):
-            manufacturer = "ZTE"
-        elif "SIERRA" in model:
-            manufacturer = "Sierra Wireless"
-        elif "NOKIA" in model:
-            manufacturer = "Nokia"
-        elif "ALCATEL" in model:
-            manufacturer = "Alcatel"
-        
         return {
             "identifiers": {(DOMAIN, imei)},
             "name": f"Dongle {imei}",
-            "manufacturer": manufacturer,
+            "manufacturer": self._manufacturer,
             "model": self._device_info.get("model", "Unknown"),
             "sw_version": self._device_info.get("firmware", "Unknown"),
             "via_device": (DOMAIN, self._entry_id),
@@ -162,6 +151,7 @@ class AsteriskDongleSignalSensor(SensorEntity):
             "provider": self._device_info.get("provider", ""),
             "state": self._device_info.get("state", ""),
             "device_model": self._device_info.get("model", ""),
+            "manufacturer": self._manufacturer,
         })
         return attrs
 
@@ -185,7 +175,7 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 _LOGGER.warning("No response for device %s", dongle_id)
                 return
             
-            # Парсим ответ
+            # Парсим ответ (учитывая формат AMI с префиксом Output:)
             data = self._parse_dongle_state(response)
             
             if not data:
@@ -198,6 +188,13 @@ class AsteriskDongleSignalSensor(SensorEntity):
             signal_value = self._extract_signal_value(rssi_str)
             self._attr_native_value = signal_value
             
+            # Обновляем производителя из данных
+            if "manufacturer" in data:
+                self._manufacturer = data["manufacturer"].strip().title()
+                
+                # Обновляем информацию об устройстве в реестре
+                await self._update_device_info(data)
+            
             # Сохраняем атрибуты
             self._attributes = {
                 "raw_rssi": rssi_str,
@@ -208,24 +205,49 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 "lac": data.get("location_area_code", ""),
                 "cell_id": data.get("cell_id", ""),
                 "signal_quality": self._calculate_signal_quality(signal_value),
+                "manufacturer": self._manufacturer,
             }
             
             self._last_update = datetime.now().isoformat()
             self._available = True
             
-            _LOGGER.debug("Successfully updated sensor for device %s", dongle_id)
+            _LOGGER.debug("Successfully updated sensor for device %s. Signal: %s dBm, Manufacturer: %s", 
+                         dongle_id, signal_value, self._manufacturer)
             
         except Exception as e:
             _LOGGER.error("Error updating sensor for %s: %s", 
                          self._device_info[ATTR_DONGLE_ID], str(e))
             self._available = False
 
+    async def _update_device_info(self, data: dict):
+        """Обновляет информацию об устройстве в реестре устройств."""
+        try:
+            device_registry = dr.async_get(self.hass)
+            imei = self._device_info[ATTR_IMEI]
+            
+            # Находим устройство по IMEI
+            device = device_registry.async_get_device(
+                identifiers={(DOMAIN, imei)}
+            )
+            
+            if device:
+                # Обновляем производителя и другие поля
+                device_registry.async_update_device(
+                    device.id,
+                    manufacturer=self._manufacturer,
+                    model=data.get("model", self._device_info.get("model", "Unknown")),
+                    sw_version=data.get("firmware", self._device_info.get("firmware", "Unknown")),
+                )
+                _LOGGER.debug("Updated device info for %s: %s", imei, self._manufacturer)
+        except Exception as e:
+            _LOGGER.warning("Could not update device info: %s", e)
+
     def _extract_signal_value(self, rssi_str: str):
         """Извлекает значение сигнала из строки."""
         if not rssi_str:
             return None
         
-        # Пробуем извлечь значение в dBm
+        # Пробуем извлечь значение в dBm (формат: "26, -61 dBm")
         match = re.search(r"(-?\d+)\s*dBm", rssi_str)
         if match:
             return int(match.group(1))
@@ -240,7 +262,7 @@ class AsteriskDongleSignalSensor(SensorEntity):
         return None
 
     def _parse_dongle_state(self, response):
-        """Парсинг ответа от dongle."""
+        """Парсинг ответа от dongle show device state через AMI."""
         data = {}
         lines = response.split('\n')
         in_output_block = False
@@ -256,10 +278,19 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 in_output_block = False
                 continue
                 
-            if in_output_block and ":" in line:
-                key, value = line.split(":", 1)
-                key = key.strip().lower().replace(" ", "_")
-                data[key] = value.strip()
+            if in_output_block and line.startswith("Output: "):
+                # Удаляем префикс "Output: " перед парсингом
+                line = line[8:].strip()
+                
+                # Пропускаем разделители и пустые строки
+                if not line or line.startswith("---"):
+                    continue
+                
+                # Парсим строки вида "Manufacturer            : huawei"
+                if ":" in line:
+                    key, value = line.split(":", 1)
+                    key = key.strip().lower().replace(" ", "_")
+                    data[key] = value.strip()
         
         return data
 
