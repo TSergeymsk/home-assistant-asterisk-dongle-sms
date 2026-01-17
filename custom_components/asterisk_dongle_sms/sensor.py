@@ -204,15 +204,35 @@ class AsteriskDongleSignalSensor(SensorEntity):
             self._available = False
             self._state = None
 
-    def _parse_dongle_state(self, response):
-        """Parse dongle state response."""
-        data = {}
-        for line in response.splitlines():
-            if ":" in line and "--" not in line and "===" not in line:
-                key, value = line.split(":", 1)
+def _parse_dongle_state(self, response):
+    """Parse dongle state response from AMI with proper handling."""
+    data = {}
+    
+    # Ищем блок с данными dongle
+    lines = response.split('\n')
+    in_output_block = False
+    
+    for line in lines:
+        line = line.strip()
+        
+        # Начало блока данных
+        if "Command output follows" in line:
+            in_output_block = True
+            continue
+            
+        # Конец блока данных
+        if line == "" and in_output_block:
+            break
+            
+        if in_output_block and line.startswith("Output:"):
+            # Убираем "Output:" и обрабатываем
+            content = line[7:].strip()
+            if ":" in content:
+                key, value = content.split(":", 1)
                 key = key.strip().lower().replace(" ", "_")
                 data[key] = value.strip()
-        return data
+    
+    return data
 
     @property
     def icon(self):
@@ -232,3 +252,4 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 return "mdi:signal-off"
         except (ValueError, TypeError):
             return "mdi:signal"
+
