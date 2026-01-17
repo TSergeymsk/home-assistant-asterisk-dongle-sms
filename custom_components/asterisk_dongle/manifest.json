@@ -1,8 +1,8 @@
 {
   "domain": "asterisk",
   "name": "Asterisk Dongle",
-  "documentation": "https://github.com/TSergeymsk/home-assistant-asterisk-dongle-sms",
-  "issue_tracker": "https://github.com/TSergeymsk/home-assistant-asterisk-dongle-sms/issues",
+  "documentation": "https://github.com/TSergeymsk/home-assistant-asterisk-dongle",
+  "issue_tracker": "https://github.com/TSergeymsk/home-assistant-asterisk-dongle/issues",
   "dependencies": [],
   "requirements": ["asterisk-ami>=0.1.7"],
   "codeowners": ["@PaulAnnekov","@TSergeymsk"],

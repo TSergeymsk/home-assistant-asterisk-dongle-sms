@@ -1,5 +1,5 @@
 {
-  "name": "Asterisk Dongle SMS/USSD",
+  "name": "Asterisk Dongle",
   "render_readme": true,
   "domains": ["notify", "sensor"],
   "homeassistant": "2023.1.0",
