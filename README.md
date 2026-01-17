@@ -53,6 +53,16 @@ Copy `custom_components/asterisk_dongle_sms/` contents from repo into `custom_co
       user: smart-home # Asterisk AMI user name
       password: your_password # Asterisk AMI user password
       dngtype: sms #sms for sms, ussd for ussd
+
+  sensor:
+  - platform: asterisk_dongle_sms
+    dongle: dongle0
+    address: !secret asterisk_host
+    port: !secret asterisk_port
+    user: !secret asterisk_username
+    password: !secret asterisk_password
+    name: "Cellular Signal"
+    scan_interval: 60
   ```
 
 5. Add [automation](https://home-assistant.io/docs/automation/action/).
