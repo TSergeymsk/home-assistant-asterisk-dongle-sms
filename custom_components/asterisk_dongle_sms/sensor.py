@@ -43,8 +43,19 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     password = config[CONF_PASSWORD]
     dongle = config[CONF_DONGLE]
     name = config[CONF_NAME]
-    scan_interval = config[CONF_SCAN_INTERVAL]
-
+    
+    # Явное преобразование scan_interval в int
+    scan_interval = config.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
+    if isinstance(scan_interval, str):
+        try:
+            scan_interval = int(scan_interval)
+        except ValueError:
+            _LOGGER.warning(f"Invalid scan_interval value: {scan_interval}, using default: {DEFAULT_SCAN_INTERVAL}")
+            scan_interval = DEFAULT_SCAN_INTERVAL
+    elif not isinstance(scan_interval, int):
+        _LOGGER.warning(f"scan_interval is not an integer: {type(scan_interval).__name__}, using default: {DEFAULT_SCAN_INTERVAL}")
+        scan_interval = DEFAULT_SCAN_INTERVAL
+    
     # Создаем менеджер AMI
     ami = AsteriskManager(address, port, user, password)
     
