@@ -105,13 +105,13 @@ class AsteriskDongleSignalSensor(SensorEntity):
         self._device_info = device_info
         self._entry_id = entry_id
         
-        # Уникальный ID
+        # Уникальный ID - используем только IMEI
         imei = device_info[ATTR_IMEI]
-        self._attr_unique_id = f"{entry_id}_{imei}_signal"
+        self._attr_unique_id = f"cell_signal_{imei}"
         
-        # Имя сенсора
-        dongle_id = device_info[ATTR_DONGLE_ID]
-        self._attr_name = f"Signal Strength {dongle_id}"
+        # Имя сенсора - используем короткий IMEI (последние 6 цифр)
+        imei_short = imei[-6:] if len(imei) >= 6 else imei
+        self._attr_name = f"Cell Signal {imei_short}"
         
         # Атрибуты сенсора
         self._attr_device_class = "signal_strength"
@@ -131,10 +131,11 @@ class AsteriskDongleSignalSensor(SensorEntity):
         """Возвращает информацию об устройстве."""
         imei = self._device_info[ATTR_IMEI]
         dongle_id = self._device_info[ATTR_DONGLE_ID]
+        imei_short = imei[-6:] if len(imei) >= 6 else imei
         
         return {
             "identifiers": {(DOMAIN, imei)},
-            "name": f"Dongle {dongle_id}",
+            "name": f"Dongle {dongle_id} ({imei_short})",
             "manufacturer": self._device_info.get("model", "Unknown"),
             "model": self._device_info.get("model", "Unknown"),
             "sw_version": self._device_info.get("firmware", "Unknown"),
@@ -179,6 +180,7 @@ class AsteriskDongleSignalSensor(SensorEntity):
             
             if not data:
                 self._available = False
+                _LOGGER.warning("Could not parse response for device %s", dongle_id)
                 return
             
             # Извлекаем уровень сигнала
@@ -200,6 +202,8 @@ class AsteriskDongleSignalSensor(SensorEntity):
             
             self._last_update = datetime.now().isoformat()
             self._available = True
+            
+            _LOGGER.debug("Successfully updated sensor for device %s", dongle_id)
             
         except Exception as e:
             _LOGGER.error("Error updating sensor for %s: %s", 

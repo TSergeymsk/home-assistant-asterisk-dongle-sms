@@ -177,10 +177,12 @@ async def _create_dongle_device(hass: HomeAssistant, entry: ConfigEntry, device_
     
     identifiers = {(DOMAIN, device_info[ATTR_IMEI])}
     
+    imei_short = device_info[ATTR_IMEI][-6:]  # Последние 6 цифр IMEI
+
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers=identifiers,
-        name=f"Dongle {device_info[ATTR_DONGLE_ID]}",
+        name=f"Dongle {device_info[ATTR_DONGLE_ID]} ({imei_short})",
         manufacturer=device_info.get("model", "Unknown"),
         model=device_info.get("model", "Unknown"),
         sw_version=device_info.get("firmware", "Unknown"),
