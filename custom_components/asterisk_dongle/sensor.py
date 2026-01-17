@@ -1,248 +1,211 @@
 """Platform for sensor integration."""
+from __future__ import annotations
+
 import logging
 import re
-from datetime import timedelta
+from datetime import datetime
+from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
-from homeassistant.const import CONF_NAME, CONF_PASSWORD, CONF_PORT
-import homeassistant.helpers.config_validation as cv
-import voluptuous as vol
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from .notify import AsteriskManager
+from .const import (
+    DOMAIN,
+    DATA_ASTERISK_MANAGER,
+    DATA_DEVICES,
+    ATTR_IMEI,
+    ATTR_DONGLE_ID,
+    SIGNAL_DEVICE_DISCOVERED,
+    SIGNAL_DEVICE_REMOVED,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
-# Конфигурационные константы - должны совпадать с notify.py
-CONF_ADDRESS = 'address'
-CONF_USER = 'user'
-CONF_DONGLE = 'dongle'
-CONF_SCAN_INTERVAL = 'scan_interval'
 
-# Дополнительные для сенсора
-DEFAULT_NAME = "Asterisk Dongle Signal"
-DEFAULT_SCAN_INTERVAL = 60
-
-# Используем встроенный валидатор time_period, который преобразует в timedelta
-PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
-    {
-        vol.Required(CONF_DONGLE): cv.string,
-        vol.Required(CONF_ADDRESS): cv.string,
-        vol.Required(CONF_PORT): cv.port,
-        vol.Required(CONF_USER): cv.string,
-        vol.Required(CONF_PASSWORD): cv.string,
-        vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): cv.time_period,
-    }
-)
-
-
-def setup_platform(hass, config, add_entities, discovery_info=None):
-    """Set up the sensor platform."""
-    address = config[CONF_ADDRESS]
-    port = config[CONF_PORT]
-    user = config[CONF_USER]
-    password = config[CONF_PASSWORD]
-    dongle = config[CONF_DONGLE]
-    name = config[CONF_NAME]
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Настройка сенсоров из ConfigEntry."""
+    data = hass.data[DOMAIN][entry.entry_id]
+    manager = data[DATA_ASTERISK_MANAGER]
+    devices = data[DATA_DEVICES]
     
-    # scan_interval теперь timedelta (от cv.time_period)
-    scan_interval_td = config.get(CONF_SCAN_INTERVAL)
+    # Создаем начальные сенсоры
+    entities = []
+    for imei, device_info in devices.items():
+        entities.append(
+            AsteriskDongleSignalSensor(
+                hass=hass,
+                manager=manager,
+                device_info=device_info,
+                entry_id=entry.entry_id
+            )
+        )
     
-    # Преобразуем timedelta в секунды (int)
-    if isinstance(scan_interval_td, timedelta):
-        scan_interval = int(scan_interval_td.total_seconds())
-        _LOGGER.debug("Converted timedelta %s to %s seconds", scan_interval_td, scan_interval)
-    else:
-        # На случай, если это не timedelta
-        try:
-            scan_interval = int(scan_interval_td)
-        except (TypeError, ValueError):
-            scan_interval = DEFAULT_SCAN_INTERVAL
-            _LOGGER.warning("Invalid scan_interval, using default: %s", scan_interval)
+    async_add_entities(entities, update_before_add=True)
     
-    # Проверяем, что значение положительное
-    if scan_interval <= 0:
-        _LOGGER.warning("scan_interval must be positive, using default: %s", DEFAULT_SCAN_INTERVAL)
-        scan_interval = DEFAULT_SCAN_INTERVAL
+    # Регистрируем обработчики для новых устройств
+    async def async_add_sensor(device_info):
+        """Добавить сенсор для нового устройства."""
+        new_sensor = AsteriskDongleSignalSensor(
+            hass=hass,
+            manager=manager,
+            device_info=device_info,
+            entry_id=entry.entry_id
+        )
+        async_add_entities([new_sensor])
+        _LOGGER.debug("Added new sensor for device: %s", device_info[ATTR_IMEI])
     
-    # Создаем менеджер AMI
-    ami = AsteriskManager(address, port, user, password)
+    # Подписываемся на сигналы
+    async_dispatcher_connect(
+        hass,
+        f"{SIGNAL_DEVICE_DISCOVERED}_{entry.entry_id}",
+        async_add_sensor
+    )
     
-    # Создаем сенсор
-    sensor = AsteriskDongleSignalSensor(ami, dongle, name, scan_interval)
-    
-    # Добавляем сенсор в Home Assistant
-    add_entities([sensor])
-    
-    _LOGGER.debug("Asterisk dongle signal sensor initialized for %s", dongle)
+    # TODO: Обработка удаления устройств через entity registry
 
 
 class AsteriskDongleSignalSensor(SensorEntity):
-    """Representation of a Dongle Signal Sensor."""
-
-    def __init__(self, ami, dongle, name, scan_interval):
-        """Initialize the sensor."""
-        self._ami = ami
-        self._dongle = dongle
-        self._name = name
-        self._scan_interval = scan_interval
+    """Сенсор уровня сигнала dongle."""
+    
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        manager,
+        device_info: dict[str, Any],
+        entry_id: str
+    ):
+        """Инициализация сенсора."""
+        self.hass = hass
+        self._manager = manager
+        self._device_info = device_info
+        self._entry_id = entry_id
+        
+        # Уникальный ID
+        self._attr_unique_id = f"{entry_id}_{device_info[ATTR_IMEI]}_signal"
+        
+        # Имя сенсора
+        imei_short = device_info[ATTR_IMEI][-6:]
+        self._attr_name = f"Cell Signal {imei_short}"
+        
+        # Атрибуты сенсора
+        self._attr_device_class = "signal_strength"
+        self._attr_native_unit_of_measurement = "dBm"
+        self._attr_should_poll = True
+        
+        # Состояние
         self._state = None
         self._attributes = {}
         self._available = True
-        self._unit_of_measurement = "dBm"
+        
+        # История обновлений
+        self._last_update = None
 
     @property
-    def name(self):
-        """Return the name of the sensor."""
-        return self._name
-
-    @property
-    def unique_id(self):
-        """Return a unique ID."""
-        return f"asterisk_dongle_signal_{self._dongle}"
-
-    @property
-    def state(self):
-        """Return the state of the sensor."""
-        return self._state
-
-    @property
-    def unit_of_measurement(self):
-        """Return the unit of measurement."""
-        return self._unit_of_measurement
-
-    @property
-    def device_class(self):
-        """Return the device class."""
-        return "signal_strength"
+    def device_info(self):
+        """Возвращает информацию об устройстве."""
+        return {
+            "identifiers": {(DOMAIN, self._device_info[ATTR_IMEI])},
+            "name": f"Dongle {self._device_info[ATTR_DONGLE_ID]}",
+            "manufacturer": self._device_info.get("model", "Unknown"),
+            "model": self._device_info.get("model", "Unknown"),
+            "sw_version": self._device_info.get("firmware", "Unknown"),
+            "via_device": (DOMAIN, self._entry_id),
+        }
 
     @property
     def extra_state_attributes(self):
-        """Return extra attributes."""
-        return self._attributes
+        """Возвращает дополнительные атрибуты."""
+        attrs = self._attributes.copy()
+        attrs.update({
+            "imei": self._device_info[ATTR_IMEI],
+            "dongle_id": self._device_info[ATTR_DONGLE_ID],
+            "last_update": self._last_update,
+        })
+        return attrs
 
     @property
     def available(self):
-        """Return True if entity is available."""
+        """Возвращает доступность сенсора."""
         return self._available
 
-    def update(self):
-        """Fetch new state data for the sensor."""
+    async def async_update(self):
+        """Обновление данных сенсора."""
         try:
-            # Отправляем команду для получения состояния dongle
-            command = f"dongle show device state {self._dongle}"
-            response = self._ami.send_command(command)
+            # Получаем детальную информацию о донгле
+            command = f"dongle show device state {self._device_info[ATTR_DONGLE_ID]}"
+            response = await self.hass.async_add_executor_job(
+                self._manager.send_command, command
+            )
             
-            if response is None:
-                _LOGGER.error("No response from Asterisk for dongle %s", self._dongle)
+            if not response:
                 self._available = False
-                self._state = None
                 return
-            
-            # Отладочный вывод сырого ответа
-            _LOGGER.debug("Raw AMI response (first 500 chars): %s", response[:500])
             
             # Парсим ответ
             data = self._parse_dongle_state(response)
             
             if not data:
-                _LOGGER.error("Failed to parse response for dongle %s", self._dongle)
                 self._available = False
-                self._state = None
                 return
             
-            _LOGGER.debug("Parsed data keys: %s", list(data.keys()))
-            
-            # Извлекаем уровень сигнала в dBm
+            # Извлекаем уровень сигнала
             rssi_str = data.get("rssi", "")
-            _LOGGER.debug("Raw RSSI string: %s", rssi_str)
-            
-            # Ищем значение в dBm в строке "25, -63 dBm"
             match = re.search(r"(-?\d+)\s*dBm", rssi_str)
             if match:
-                self._state = int(match.group(1))
-                self._unit_of_measurement = "dBm"
-                _LOGGER.debug("Extracted dBm value: %s", self._state)
+                self._attr_native_value = int(match.group(1))
             else:
-                # Если не нашли dBm, попробуем извлечь сырое значение
                 match_raw = re.search(r"(\d+)\s*,\s*", rssi_str)
                 if match_raw:
                     raw_value = int(match_raw.group(1))
-                    # Конвертируем условные единицы в dBm (примерная формула)
-                    if raw_value <= 31:
-                        self._state = (raw_value * 2) - 113
-                        self._unit_of_measurement = "dBm"
-                        _LOGGER.debug("Converted raw RSSI %s to dBm: %s", raw_value, self._state)
-                    else:
-                        self._state = raw_value
-                        self._unit_of_measurement = "level"
+                    self._attr_native_value = (raw_value * 2) - 113
                 else:
-                    self._state = None
-                    self._unit_of_measurement = None
-            
-            # Рассчитываем качество сигнала и иконку
-            signal_quality = self._calculate_signal_quality(self._state)
-            signal_icon = self._get_signal_icon(self._state)
+                    self._attr_native_value = None
             
             # Сохраняем атрибуты
             self._attributes = {
-                "device": self._dongle,
                 "raw_rssi": rssi_str,
-                "signal_quality": signal_quality,
-                "signal_icon": signal_icon,
-                "device_state": data.get("state", ""),
                 "provider": data.get("provider_name", ""),
                 "registration": data.get("gsm_registration_status", ""),
-                "mode": data.get("mode", ""),
+                "network_mode": data.get("mode", ""),
                 "submode": data.get("submode", ""),
-                "imei": data.get("imei", ""),
-                "imsi": data.get("imsi", ""),
-                "model": data.get("model", ""),
-                "firmware": data.get("firmware", ""),
                 "lac": data.get("location_area_code", ""),
                 "cell_id": data.get("cell_id", ""),
-                "audio_port": data.get("audio", ""),
-                "data_port": data.get("data", ""),
-                "voice_support": data.get("voice", ""),
-                "sms_support": data.get("sms", ""),
-                "manufacturer": data.get("manufacturer", ""),
-                "subscriber_number": data.get("subscriber_number", ""),
-                "call_waiting": data.get("call_waiting", ""),
-                "sms_service_center": data.get("sms_service_center", ""),
+                "signal_quality": self._calculate_signal_quality(self._attr_native_value),
             }
             
+            self._last_update = datetime.now().isoformat()
             self._available = True
-            _LOGGER.debug("Successfully updated sensor for dongle %s", self._dongle)
             
         except Exception as e:
-            _LOGGER.error("Error updating dongle signal for %s: %s", self._dongle, str(e))
+            _LOGGER.error("Error updating sensor for %s: %s", 
+                         self._device_info[ATTR_IMEI], str(e))
             self._available = False
-            self._state = None
 
     def _parse_dongle_state(self, response):
-        """Parse dongle state response from AMI with proper handling."""
+        """Парсинг ответа от dongle."""
         data = {}
-        
-        # Ищем блок с данными dongle
         lines = response.split('\n')
         in_output_block = False
         
         for line in lines:
             line = line.strip()
             
-            # Начало блока данных
             if "Command output follows" in line:
                 in_output_block = True
                 continue
                 
-            # Конец блока данных (пустая строка после блока)
             if line == "" and in_output_block:
-                # Не прерываемся, могут быть другие блоки
                 in_output_block = False
                 continue
                 
             if in_output_block and line.startswith("Output:"):
-                # Убираем "Output:" и обрабатываем
                 content = line[7:].strip()
                 if ":" in content:
                     key, value = content.split(":", 1)
@@ -252,49 +215,31 @@ class AsteriskDongleSignalSensor(SensorEntity):
         return data
 
     def _calculate_signal_quality(self, signal_db):
-        """Calculate signal quality from dBm value."""
+        """Рассчитывает качество сигнала."""
         if signal_db is None:
-            return "Нет данных"
+            return "Unknown"
         
         try:
             signal = int(signal_db)
             if signal >= -70:
-                return "Отличный"
+                return "Excellent"
             elif signal >= -85:
-                return "Хороший"
+                return "Good"
             elif signal >= -100:
-                return "Слабый"
+                return "Fair"
             else:
-                return "Очень слабый"
+                return "Poor"
         except (ValueError, TypeError):
-            return "Неизвестно"
-
-    def _get_signal_icon(self, signal_db):
-        """Get appropriate icon for signal level."""
-        if signal_db is None:
-            return "mdi:signal-off"
-        
-        try:
-            signal = int(signal_db)
-            if signal >= -70:
-                return "mdi:signal-cellular-3"
-            elif signal >= -85:
-                return "mdi:signal-cellular-2"
-            elif signal >= -100:
-                return "mdi:signal-cellular-1"
-            else:
-                return "mdi:signal-off"
-        except (ValueError, TypeError):
-            return "mdi:signal"
+            return "Unknown"
 
     @property
     def icon(self):
-        """Return the icon to use in the frontend."""
-        if self._state is None:
+        """Возвращает иконку."""
+        if self._attr_native_value is None:
             return "mdi:signal-off"
         
         try:
-            signal = int(self._state)
+            signal = int(self._attr_native_value)
             if signal >= -70:
                 return "mdi:signal"
             elif signal >= -85:

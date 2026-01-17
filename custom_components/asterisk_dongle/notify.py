@@ -1,155 +1,154 @@
-"""
-Asterisk Dongle SMS send platform for notify component.
-"""
-import logging
-import socket
-import time
+"""Platform for notify integration."""
+from __future__ import annotations
 
-import voluptuous as vol
+import logging
+from typing import Any
 
 from homeassistant.components.notify import (
-    ATTR_TARGET, BaseNotificationService, PLATFORM_SCHEMA)
-import homeassistant.helpers.config_validation as cv
+    ATTR_TARGET,
+    BaseNotificationService,
+    DOMAIN as NOTIFY_DOMAIN,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import discovery
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-CONF_DONGLE = 'dongle'
-CONF_ADDRESS = 'address'
-CONF_PORT = 'port'
-CONF_USER = 'user'
-CONF_PASSWORD = 'password'
-CONF_DNGTYPE = 'dngtype'
-
-PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
-    vol.Required(CONF_DONGLE): cv.string,
-    vol.Required(CONF_ADDRESS): cv.string,
-    vol.Required(CONF_PORT): cv.port,
-    vol.Required(CONF_USER): cv.string,
-    vol.Required(CONF_PASSWORD): cv.string,
-    vol.Optional(CONF_DNGTYPE, default='sms'): vol.In(['sms', 'ussd']),
-})
+from .const import (
+    DOMAIN,
+    DATA_ASTERISK_MANAGER,
+    DATA_DEVICES,
+    DATA_CONFIG_ENTRY,
+    ATTR_IMEI,
+    ATTR_DONGLE_ID,
+    SERVICE_SMS,
+    SERVICE_USSD,
+    SIGNAL_DEVICE_DISCOVERED,
+    SIGNAL_DEVICE_REMOVED,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def get_service(hass, config, discovery_info=None):
-    """Get the Asterisk notification service."""
-    dongle = config.get(CONF_DONGLE)
-    address = config.get(CONF_ADDRESS)
-    port = config.get(CONF_PORT)
-    user = config.get(CONF_USER)
-    password = config.get(CONF_PASSWORD)
-    dngtype = config.get(CONF_DNGTYPE)
-
-    return AsteriskNotificationService(dongle, address, port, user, password, dngtype)
-
-
-class AsteriskManager:
-    """Manager for Asterisk AMI connection."""
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Настройка notify платформы из ConfigEntry."""
+    data = hass.data[DOMAIN][entry.entry_id]
+    devices = data[DATA_DEVICES]
     
-    def __init__(self, address, port, user, password):
-        """Initialize the Asterisk manager."""
-        self._address = address
-        self._port = port
-        self._user = user
-        self._password = password
-        
-    def send_command(self, command):
-        """Send a command to Asterisk via AMI and return the response."""
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(5)
-            sock.connect((self._address, self._port))
-            
-            # Login to AMI
-            login_action = f'Action: Login\r\nUsername: {self._user}\r\nSecret: {self._password}\r\n\r\n'
-            sock.send(login_action.encode())
-            time.sleep(0.5)
-            
-            # Send command
-            command_action = f'Action: Command\r\nCommand: {command}\r\n\r\n'
-            sock.send(command_action.encode())
-            time.sleep(1)
-            
-            # Receive response
-            response = sock.recv(8192).decode(errors='ignore')
-            sock.close()
-            
-            return response
-            
-        except Exception as e:
-            _LOGGER.error(f"Error connecting to Asterisk AMI: {e}")
-            return None
+    # Создаем начальные сервисы notify
+    for imei, device_info in devices.items():
+        await _create_notify_services(hass, entry.entry_id, device_info)
     
-    def send_ami_action(self, action_name, **kwargs):
-        """Send a raw AMI action (for SMS/USSD)."""
-        try:
-            from asterisk.ami import AMIClient
-            from asterisk.ami.action import SimpleAction
-            
-            client = AMIClient(address=self._address, port=self._port)
-            future = client.login(username=self._user, secret=self._password)
-            
-            if future.response.is_error():
-                _LOGGER.error("Can't connect to Asterisk AMI: %s", " ".join(str(future.response).splitlines()))
-                return None
-            
-            action = SimpleAction(action_name, **kwargs)
-            client.send_action(action)
-            client.logoff()
-            
-            return True
-            
-        except Exception as e:
-            _LOGGER.error(f"Error sending AMI action: {e}")
-            return False
+    # Регистрируем обработчики для новых устройств
+    async def async_add_notify_services(device_info):
+        """Добавить сервисы notify для нового устройства."""
+        await _create_notify_services(hass, entry.entry_id, device_info)
+    
+    async_dispatcher_connect(
+        hass,
+        f"{SIGNAL_DEVICE_DISCOVERED}_{entry.entry_id}",
+        async_add_notify_services
+    )
+    
+    return True
 
 
-class AsteriskNotificationService(BaseNotificationService):
-    """Implementation of a notification service for Asterisk."""
+async def _create_notify_services(
+    hass: HomeAssistant,
+    entry_id: str,
+    device_info: dict[str, Any]
+):
+    """Создать сервисы SMS и USSD для устройства."""
+    data = hass.data[DOMAIN][entry_id]
+    manager = data[DATA_ASTERISK_MANAGER]
+    imei = device_info[ATTR_IMEI]
+    
+    # Создаем сервис SMS
+    sms_service = AsteriskSMSNotifyService(
+        manager=manager,
+        device_info=device_info,
+        entry_id=entry_id
+    )
+    
+    # Создаем сервис USSD
+    ussd_service = AsteriskUSSDNotifyService(
+        manager=manager,
+        device_info=device_info,
+        entry_id=entry_id
+    )
+    
+    # Регистрируем сервисы
+    hass.services.async_register(
+        NOTIFY_DOMAIN,
+        f"sms_{imei}",
+        sms_service.async_send_message,
+        schema=SMS_SERVICE_SCHEMA,
+    )
+    
+    hass.services.async_register(
+        NOTIFY_DOMAIN,
+        f"ussd_{imei}",
+        ussd_service.async_send_message,
+        schema=USSD_SERVICE_SCHEMA,
+    )
+    
+    _LOGGER.debug("Created notify services for device: %s", imei)
 
-    def __init__(self, dongle, address, port, user, password, dngtype='sms'):
-        """Initialize the service."""
-        self._dongle = dongle
-        self._address = address
-        self._port = port
-        self._user = user
-        self._password = password
-        self._dngtype = dngtype
-        self._ami_manager = AsteriskManager(address, port, user, password)
 
-    def send_message(self, message="", **kwargs):
-        """Send an SMS or USSD to target users."""
-        targets = kwargs.get(ATTR_TARGET)
-
-        if targets is None:
-            _LOGGER.error("No SMS/USSD targets, as 'target' is not defined")
+class AsteriskSMSNotifyService(BaseNotificationService):
+    """Сервис для отправки SMS через dongle."""
+    
+    def __init__(self, manager, device_info: dict[str, Any], entry_id: str):
+        """Инициализация сервиса."""
+        self._manager = manager
+        self._device_info = device_info
+        self._entry_id = entry_id
+    
+    async def async_send_message(self, message: str = "", **kwargs: Any) -> None:
+        """Отправка SMS сообщения."""
+        # Номер получателя должен быть в kwargs
+        number = kwargs.get("number")
+        if not number:
+            _LOGGER.error("Phone number is required for SMS")
             return
+        
+        # Формируем команду AMI для отправки SMS
+        # В зависимости от вашего модуля dongle
+        cmd = (
+            f"dongle sms {self._device_info[ATTR_DONGLE_ID]} "
+            f"{number} {message}"
+        )
+        
+        try:
+            response = await self.hass.async_add_executor_job(
+                self._manager.send_command, cmd
+            )
+            _LOGGER.debug("SMS send response: %s", response)
+        except Exception as e:
+            _LOGGER.error("Error sending SMS: %s", e)
 
-        for target in targets:
-            _LOGGER.debug("Sending %s to %s", self._dngtype.upper(), target)
-            
-            if self._dngtype == 'sms':
-                success = self._ami_manager.send_ami_action(
-                    'DongleSendSMS',
-                    Device=self._dongle,
-                    Number=target,
-                    Message=message,
-                )
-            elif self._dngtype == 'ussd':
-                success = self._ami_manager.send_ami_action(
-                    'DongleSendUSSD',
-                    Device=self._dongle,
-                    USSD=message,
-                )
-            else:
-                _LOGGER.error("Unknown dongle type: %s", self._dngtype)
-                return
 
-            if success:
-                _LOGGER.debug("%s to %s sent successfully", self._dngtype.upper(), target)
-            else:
-                _LOGGER.error("Failed to send %s to %s", self._dngtype.upper(), target)
-
-    def get_dongle_state(self):
-        """Get dongle state information."""
-        response = self._ami_manager.send_command(f'dongle show device state {self._dongle}')
-        return response
+class AsteriskUSSDNotifyService(BaseNotificationService):
+    """Сервис для отправки USSD запросов через dongle."""
+    
+    def __init__(self, manager, device_info: dict[str, Any], entry_id: str):
+        """Инициализация сервиса."""
+        self._manager = manager
+        self._device_info = device_info
+        self._entry_id = entry_id
+    
+    async def async_send_message(self, message: str = "", **kwargs: Any) -> None:
+        """Отправка USSD запроса."""
+        # USSD код должен быть в message
+        if not message.startswith("*"):
+            _LOGGER.warning("USSD code should start with *")
+        
+        # Формируем команду AMI для отправки USSD
+        cmd = f"dongle ussd {self._device_info[ATTR_DONGLE_ID]} {message}"
+        
+        try:
+            response = await self.hass.async_add_executor_job(
+                self._manager.send_command, cmd
+            )
+            _LOGGER.debug("USSD send response: %s", response)
+        except Exception as e:
+            _LOGGER.error("Error sending USSD: %s", e)

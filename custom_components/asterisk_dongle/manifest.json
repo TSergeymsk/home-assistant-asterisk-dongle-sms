@@ -1,12 +1,12 @@
 {
   "domain": "asterisk_dongle",
   "name": "Asterisk Dongle",
-  "documentation": "https://github.com/your-repo/asterisk-dongle",
-  "issue_tracker": "https://github.com/your-repo/asterisk-dongle/issues",
+  "documentation": "https://github.com/yourusername/asterisk-dongle",
+  "issue_tracker": "https://github.com/yourusername/asterisk-dongle/issues",
   "dependencies": [],
   "requirements": [],
   "codeowners": ["@PaulAnnekov","@TSergeymsk"],
   "config_flow": true,
-  "version": "1.2.0",
+  "version": "2.0.0",
   "iot_class": "local_polling"
 }

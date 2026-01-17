@@ -17,7 +17,6 @@ DISCOVERY_INTERVAL: Final = 3600  # 1 час
 
 # Ключи для hass.data
 DATA_ASTERISK_MANAGER: Final = "asterisk_manager"
-DATA_DEVICE_DISCOVERY: Final = "device_discovery"
 DATA_DEVICES: Final = "devices"
 DATA_CONFIG_ENTRY: Final = "config_entry"
 
@@ -26,6 +25,14 @@ ATTR_IMEI: Final = "imei"
 ATTR_DONGLE_ID: Final = "dongle_id"
 ATTR_MODEL: Final = "model"
 
+# Сигналы для обновления устройств
+SIGNAL_DEVICE_DISCOVERED: Final = "asterisk_dongle_device_discovered"
+SIGNAL_DEVICE_REMOVED: Final = "asterisk_dongle_device_removed"
+
 # Типы платформ
 PLATFORM_NOTIFY: Final = "notify"
 PLATFORM_SENSOR: Final = "sensor"
+
+# Типы сервисов notify
+SERVICE_SMS: Final = "sms"
+SERVICE_USSD: Final = "ussd"
