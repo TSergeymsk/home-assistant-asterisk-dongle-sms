@@ -1,6 +1,3 @@
-Вот обновлённый `README.md`, отражающий все изменения в интеграции:
-
-```markdown
 # Asterisk Dongle Integration for Home Assistant
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
@@ -202,9 +199,5 @@ logger:
 - Proper device naming (`Dongle <IMEI>`)
 - Manufacturer detection from dongle data
 - Dynamic device/service management
-
-## Support
-
-For issues and feature requests, please visit the GitHub repository.
 
 The README now accurately represents the current state of the integration and provides comprehensive documentation for users.
