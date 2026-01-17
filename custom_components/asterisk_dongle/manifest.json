@@ -1,12 +1,12 @@
 {
-  "domain": "asterisk_dongle",
+  "domain": "asterisk",
   "name": "Asterisk Dongle",
-  "documentation": "https://github.com/your-repo/asterisk-dongle",
-  "issue_tracker": "https://github.com/your-repo/asterisk-dongle/issues",
+  "documentation": "https://github.com/TSergeymsk/home-assistant-asterisk-dongle-sms",
+  "issue_tracker": "https://github.com/TSergeymsk/home-assistant-asterisk-dongle-sms/issues",
   "dependencies": [],
   "requirements": ["asterisk-ami>=0.1.7"],
   "codeowners": ["@PaulAnnekov", "@TSergeymsk"],
   "config_flow": true,
-  "version": "2.1.0",
+  "version": "2.2.0",
   "iot_class": "local_polling"
 }
