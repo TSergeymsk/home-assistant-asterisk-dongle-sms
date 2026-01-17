@@ -21,14 +21,12 @@ from .const import (
     ATTR_DONGLE_ID,
     SIGNAL_DEVICE_DISCOVERED,
     SIGNAL_DEVICE_REMOVED,
-    ATTR_NUMBER,
     ATTR_MESSAGE,
-    ATTR_USSD_CODE,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-# Constants for service field names
+# Service field names - target is for phone number (SMS) or USSD code (USSD)
 ATTR_TARGET = "target"
 
 
@@ -88,25 +86,24 @@ async def _create_dongle_services(
     service_sms = f"asterisk_dongle_sms_{imei_short}"
     service_ussd = f"asterisk_dongle_ussd_{imei_short}"
 
-    # COMMON SCHEMA for both services
-    # For notify services, 'target' is expected by HA, but we'll ignore it
-    # and use the device-specific service instead
-    common_schema = vol.Schema({
-        vol.Required(ATTR_TARGET): cv.string,  # Required by HA, but we ignore
-        vol.Required(ATTR_NUMBER): cv.string,
-        vol.Required(ATTR_MESSAGE): cv.string,
+    # Different schemas for SMS and USSD
+    sms_schema = vol.Schema({
+        vol.Required(ATTR_TARGET): cv.string,  # Phone number
+        vol.Required(ATTR_MESSAGE): cv.string,  # SMS message
+    })
+
+    ussd_schema = vol.Schema({
+        vol.Required(ATTR_TARGET): cv.string,  # USSD code
     })
 
     # Register SMS service
     async def async_sms_service(call: ServiceCall):
         """Handle SMS sending."""
-        # We ignore 'target' because service is already device-specific
-        target = call.data.get(ATTR_TARGET)
-        number = call.data.get(ATTR_NUMBER)
-        message = call.data.get(ATTR_MESSAGE)
+        target = call.data.get(ATTR_TARGET)  # Phone number
+        message = call.data.get(ATTR_MESSAGE)  # SMS message
 
-        if not number:
-            _LOGGER.error("Number is required for SMS")
+        if not target:
+            _LOGGER.error("Target (phone number) is required for SMS")
             return
         
         if not message:
@@ -114,7 +111,7 @@ async def _create_dongle_services(
             return
 
         # Create SMS command
-        command = f"dongle sms {dongle_id} {number} {message}"
+        command = f"dongle sms {dongle_id} {target} {message}"
         _LOGGER.debug("Sending SMS command: %s", command)
 
         response = await hass.async_add_executor_job(manager.send_command, command)
@@ -133,29 +130,19 @@ async def _create_dongle_services(
                     break
             _LOGGER.error("Failed to send SMS via %s: %s", dongle_id, error_msg)
         else:
-            _LOGGER.info("SMS sent to %s via %s", number, dongle_id)
+            _LOGGER.info("SMS sent to %s via %s", target, dongle_id)
 
     # Register USSD service
     async def async_ussd_service(call: ServiceCall):
         """Handle USSD sending."""
-        # We ignore 'target' because service is already device-specific
-        target = call.data.get(ATTR_TARGET)
-        number = call.data.get(ATTR_NUMBER)  # This will be USSD code
-        message = call.data.get(ATTR_MESSAGE)  # We ignore this field
+        target = call.data.get(ATTR_TARGET)  # USSD code
 
-        if not number:
-            _LOGGER.error("Number (USSD code) is required for USSD")
+        if not target:
+            _LOGGER.error("Target (USSD code) is required for USSD")
             return
 
-        # Log that we ignore message field
-        if message:
-            _LOGGER.debug("Ignoring message field for USSD: %s", message)
-
-        # Use 'number' field as USSD code
-        ussd_code = number
-        
         # Create USSD command
-        command = f"dongle ussd {dongle_id} {ussd_code}"
+        command = f"dongle ussd {dongle_id} {target}"
         _LOGGER.debug("Sending USSD command: %s", command)
 
         response = await hass.async_add_executor_job(manager.send_command, command)
@@ -174,34 +161,28 @@ async def _create_dongle_services(
                     break
             _LOGGER.error("Failed to send USSD via %s: %s", dongle_id, error_msg)
         else:
-            _LOGGER.info("USSD request sent via %s: %s", dongle_id, ussd_code)
+            _LOGGER.info("USSD request sent via %s: %s", dongle_id, target)
 
-    # Register services in Home Assistant with COMMON schema
+    # Register services in Home Assistant with different schemas
     hass.services.async_register(
         domain="notify",
         service=service_sms,
         service_func=async_sms_service,
-        schema=common_schema,
+        schema=sms_schema,
     )
 
     hass.services.async_register(
         domain="notify",
         service=service_ussd,
         service_func=async_ussd_service,
-        schema=common_schema,
+        schema=ussd_schema,
     )
 
     # Set service schemas for UI display
-    sms_schema = {
+    ui_sms_schema = {
         "description": f"Send SMS via {dongle_id} ({imei_short})",
         "fields": {
             ATTR_TARGET: {
-                "name": "Target (ignored)",
-                "description": "This field is ignored - service is device-specific",
-                "required": True,
-                "selector": {"text": {}}
-            },
-            ATTR_NUMBER: {
                 "name": "Phone Number",
                 "description": "Phone number to send SMS to",
                 "required": True,
@@ -216,24 +197,12 @@ async def _create_dongle_services(
         }
     }
 
-    ussd_schema = {
-        "description": f"Send USSD request via {dongle_id} ({imei_short})\nNote: Use 'Phone Number' field for USSD code (e.g., *100#)",
+    ui_ussd_schema = {
+        "description": f"Send USSD request via {dongle_id} ({imei_short})",
         "fields": {
             ATTR_TARGET: {
-                "name": "Target (ignored)",
-                "description": "This field is ignored - service is device-specific",
-                "required": True,
-                "selector": {"text": {}}
-            },
-            ATTR_NUMBER: {
                 "name": "USSD Code",
                 "description": "USSD code to send (e.g., *100#, *102#)",
-                "required": True,
-                "selector": {"text": {}}
-            },
-            ATTR_MESSAGE: {
-                "name": "Message (ignored)",
-                "description": "This field is ignored for USSD requests",
                 "required": True,
                 "selector": {"text": {}}
             }
@@ -241,8 +210,8 @@ async def _create_dongle_services(
     }
 
     # Explicitly set schemas for BOTH services
-    await async_set_service_schema(hass, "notify", service_sms, sms_schema)
-    await async_set_service_schema(hass, "notify", service_ussd, ussd_schema)
+    await async_set_service_schema(hass, "notify", service_sms, ui_sms_schema)
+    await async_set_service_schema(hass, "notify", service_ussd, ui_ussd_schema)
 
     # Save service information for removal
     if "notify_services" not in hass.data[DOMAIN][entry_id]:
