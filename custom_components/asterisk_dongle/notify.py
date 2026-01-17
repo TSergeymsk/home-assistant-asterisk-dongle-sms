@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import logging
-import shlex
 from typing import Any
 
 import voluptuous as vol
@@ -86,6 +85,12 @@ async def _create_dongle_services(
     service_sms = f"asterisk_dongle_sms_{imei_short}"
     service_ussd = f"asterisk_dongle_ussd_{imei_short}"
 
+    # ОБЩАЯ СХЕМА для обоих сервисов
+    common_schema = vol.Schema({
+        vol.Required(ATTR_NUMBER): cv.string,
+        vol.Required(ATTR_MESSAGE): cv.string,
+    })
+
     # Регистрируем сервис отправки SMS
     async def async_sms_service(call: ServiceCall):
         """Обработчик сервиса отправки SMS."""
@@ -100,8 +105,7 @@ async def _create_dongle_services(
             _LOGGER.error("Message is required for SMS")
             return
 
-        # УБИРАЕМ shlex.quote() - AMI сам обрабатывает аргументы
-        # Если сообщение содержит пробелы, Asterisk примет его как один аргумент
+        # Создаем команду для отправки SMS
         command = f"dongle sms {dongle_id} {number} {message}"
         _LOGGER.debug("Sending SMS command: %s", command)
 
@@ -126,12 +130,20 @@ async def _create_dongle_services(
     # Регистрируем сервис отправки USSD
     async def async_ussd_service(call: ServiceCall):
         """Обработчик сервиса отправки USSD."""
-        ussd_code = call.data.get(ATTR_USSD_CODE)
+        number = call.data.get(ATTR_NUMBER)  # Это будет USSD код
+        message = call.data.get(ATTR_MESSAGE)  # Игнорируем это поле
 
-        if not ussd_code:
-            _LOGGER.error("USSD code is required")
+        if not number:
+            _LOGGER.error("Number (USSD code) is required for USSD")
             return
 
+        # Логируем, что игнорируем поле message
+        if message:
+            _LOGGER.debug("Ignoring message field for USSD: %s", message)
+
+        # Используем поле number как USSD код
+        ussd_code = number
+        
         # Важно: USSD код должен быть без кавычек
         command = f"dongle ussd {dongle_id} {ussd_code}"
         _LOGGER.debug("Sending USSD command: %s", command)
@@ -154,28 +166,22 @@ async def _create_dongle_services(
         else:
             _LOGGER.info("USSD request sent via %s: %s", dongle_id, ussd_code)
 
-    # Регистрируем сервисы в Home Assistant
+    # Регистрируем сервисы в Home Assistant с ОДИНАКОВОЙ схемой
     hass.services.async_register(
         domain="notify",
         service=service_sms,
         service_func=async_sms_service,
-        schema=vol.Schema({
-            vol.Required(ATTR_NUMBER): cv.string,
-            vol.Required(ATTR_MESSAGE): cv.string,
-        }),
+        schema=common_schema,
     )
 
     hass.services.async_register(
         domain="notify",
         service=service_ussd,
         service_func=async_ussd_service,
-        schema=vol.Schema({
-            vol.Required(ATTR_USSD_CODE): cv.string,
-        }),
+        schema=common_schema,
     )
 
     # Устанавливаем схемы сервисов для отображения в UI
-    # ОБА сервиса получают схему!
     sms_schema = {
         "description": f"Send SMS via {dongle_id} ({imei_short})",
         "fields": {
@@ -195,11 +201,17 @@ async def _create_dongle_services(
     }
 
     ussd_schema = {
-        "description": f"Send USSD request via {dongle_id} ({imei_short})",
+        "description": f"Send USSD request via {dongle_id} ({imei_short})\nNote: Use 'Phone Number' field for USSD code (e.g., *100#)",
         "fields": {
-            ATTR_USSD_CODE: {
+            ATTR_NUMBER: {
                 "name": "USSD Code",
-                "description": "USSD code to send (e.g., *100#)",
+                "description": "USSD code to send (e.g., *100#, *102#)",
+                "required": True,
+                "selector": {"text": {}}
+            },
+            ATTR_MESSAGE: {
+                "name": "Message (ignored)",
+                "description": "This field is ignored for USSD requests",
                 "required": True,
                 "selector": {"text": {}}
             }
