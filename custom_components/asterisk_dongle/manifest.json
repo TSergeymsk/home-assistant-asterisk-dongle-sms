@@ -1,5 +1,5 @@
 {
-  "domain": "asterisk",
+  "domain": "asterisk_dongle",
   "name": "Asterisk Dongle",
   "documentation": "https://github.com/TSergeymsk/home-assistant-asterisk-dongle",
   "issue_tracker": "https://github.com/TSergeymsk/home-assistant-asterisk-dongle/issues",
