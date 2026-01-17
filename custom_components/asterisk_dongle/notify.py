@@ -28,35 +28,38 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Constants for service field names
+ATTR_TARGET = "target"
+
 
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Настройка notify платформы из ConfigEntry."""
+    """Set up notify platform from ConfigEntry."""
     data = hass.data[DOMAIN][entry.entry_id]
     manager = data[DATA_ASTERISK_MANAGER]
     devices = data[DATA_DEVICES]
 
-    # Создаем сервисы для существующих устройств
+    # Create services for existing devices
     for imei, device_info in devices.items():
         await _create_dongle_services(hass, manager, device_info, entry.entry_id)
 
-    # Обработчики для обновления списка устройств
+    # Handlers for device updates
     @callback
     async def handle_device_discovered(device_info):
-        """Добавить сервисы для нового устройства."""
+        """Add services for new device."""
         await _create_dongle_services(hass, manager, device_info, entry.entry_id)
         _LOGGER.info("Added notify services for device: %s", device_info[ATTR_IMEI])
 
     @callback
     async def handle_device_removed(imei):
-        """Удалить сервисы для устройства."""
+        """Remove services for device."""
         await _remove_dongle_services(hass, imei)
         _LOGGER.info("Removed notify services for device: %s", imei)
 
-    # Подписываемся на сигналы
+    # Subscribe to signals
     async_dispatcher_connect(
         hass,
         f"{SIGNAL_DEVICE_DISCOVERED}_{entry.entry_id}",
@@ -76,24 +79,29 @@ async def _create_dongle_services(
     device_info: dict[str, Any], 
     entry_id: str
 ):
-    """Создает сервисы нотификации для донгла."""
+    """Create notification services for a dongle."""
     imei = device_info[ATTR_IMEI]
     dongle_id = device_info[ATTR_DONGLE_ID]
     imei_short = imei[-6:] if len(imei) >= 6 else imei
     
-    # Имена сервисов
+    # Service names
     service_sms = f"asterisk_dongle_sms_{imei_short}"
     service_ussd = f"asterisk_dongle_ussd_{imei_short}"
 
-    # ОБЩАЯ СХЕМА для обоих сервисов
+    # COMMON SCHEMA for both services
+    # For notify services, 'target' is expected by HA, but we'll ignore it
+    # and use the device-specific service instead
     common_schema = vol.Schema({
+        vol.Required(ATTR_TARGET): cv.string,  # Required by HA, but we ignore
         vol.Required(ATTR_NUMBER): cv.string,
         vol.Required(ATTR_MESSAGE): cv.string,
     })
 
-    # Регистрируем сервис отправки SMS
+    # Register SMS service
     async def async_sms_service(call: ServiceCall):
-        """Обработчик сервиса отправки SMS."""
+        """Handle SMS sending."""
+        # We ignore 'target' because service is already device-specific
+        target = call.data.get(ATTR_TARGET)
         number = call.data.get(ATTR_NUMBER)
         message = call.data.get(ATTR_MESSAGE)
 
@@ -105,7 +113,7 @@ async def _create_dongle_services(
             _LOGGER.error("Message is required for SMS")
             return
 
-        # Создаем команду для отправки SMS
+        # Create SMS command
         command = f"dongle sms {dongle_id} {number} {message}"
         _LOGGER.debug("Sending SMS command: %s", command)
 
@@ -127,24 +135,26 @@ async def _create_dongle_services(
         else:
             _LOGGER.info("SMS sent to %s via %s", number, dongle_id)
 
-    # Регистрируем сервис отправки USSD
+    # Register USSD service
     async def async_ussd_service(call: ServiceCall):
-        """Обработчик сервиса отправки USSD."""
-        number = call.data.get(ATTR_NUMBER)  # Это будет USSD код
-        message = call.data.get(ATTR_MESSAGE)  # Игнорируем это поле
+        """Handle USSD sending."""
+        # We ignore 'target' because service is already device-specific
+        target = call.data.get(ATTR_TARGET)
+        number = call.data.get(ATTR_NUMBER)  # This will be USSD code
+        message = call.data.get(ATTR_MESSAGE)  # We ignore this field
 
         if not number:
             _LOGGER.error("Number (USSD code) is required for USSD")
             return
 
-        # Логируем, что игнорируем поле message
+        # Log that we ignore message field
         if message:
             _LOGGER.debug("Ignoring message field for USSD: %s", message)
 
-        # Используем поле number как USSD код
+        # Use 'number' field as USSD code
         ussd_code = number
         
-        # Важно: USSD код должен быть без кавычек
+        # Create USSD command
         command = f"dongle ussd {dongle_id} {ussd_code}"
         _LOGGER.debug("Sending USSD command: %s", command)
 
@@ -166,7 +176,7 @@ async def _create_dongle_services(
         else:
             _LOGGER.info("USSD request sent via %s: %s", dongle_id, ussd_code)
 
-    # Регистрируем сервисы в Home Assistant с ОДИНАКОВОЙ схемой
+    # Register services in Home Assistant with COMMON schema
     hass.services.async_register(
         domain="notify",
         service=service_sms,
@@ -181,10 +191,16 @@ async def _create_dongle_services(
         schema=common_schema,
     )
 
-    # Устанавливаем схемы сервисов для отображения в UI
+    # Set service schemas for UI display
     sms_schema = {
         "description": f"Send SMS via {dongle_id} ({imei_short})",
         "fields": {
+            ATTR_TARGET: {
+                "name": "Target (ignored)",
+                "description": "This field is ignored - service is device-specific",
+                "required": True,
+                "selector": {"text": {}}
+            },
             ATTR_NUMBER: {
                 "name": "Phone Number",
                 "description": "Phone number to send SMS to",
@@ -203,6 +219,12 @@ async def _create_dongle_services(
     ussd_schema = {
         "description": f"Send USSD request via {dongle_id} ({imei_short})\nNote: Use 'Phone Number' field for USSD code (e.g., *100#)",
         "fields": {
+            ATTR_TARGET: {
+                "name": "Target (ignored)",
+                "description": "This field is ignored - service is device-specific",
+                "required": True,
+                "selector": {"text": {}}
+            },
             ATTR_NUMBER: {
                 "name": "USSD Code",
                 "description": "USSD code to send (e.g., *100#, *102#)",
@@ -218,11 +240,11 @@ async def _create_dongle_services(
         }
     }
 
-    # Явно устанавливаем схемы для ОБОИХ сервисов
+    # Explicitly set schemas for BOTH services
     await async_set_service_schema(hass, "notify", service_sms, sms_schema)
     await async_set_service_schema(hass, "notify", service_ussd, ussd_schema)
 
-    # Сохраняем информацию о сервисах для возможности удаления
+    # Save service information for removal
     if "notify_services" not in hass.data[DOMAIN][entry_id]:
         hass.data[DOMAIN][entry_id]["notify_services"] = {}
     
@@ -235,20 +257,20 @@ async def _create_dongle_services(
 
 
 async def _remove_dongle_services(hass: HomeAssistant, imei: str):
-    """Удаляет сервисы нотификации для устройства."""
-    # Находим entry_id для этого устройства
+    """Remove notification services for a device."""
+    # Find entry_id for this device
     for entry_id in hass.data.get(DOMAIN, {}):
         entry_data = hass.data[DOMAIN].get(entry_id, {})
         if "notify_services" in entry_data and imei in entry_data["notify_services"]:
             services = entry_data["notify_services"][imei]
             
             try:
-                # Удаляем сервис SMS
+                # Remove SMS service
                 hass.services.async_remove("notify", services["sms"])
-                # Удаляем сервис USSD
+                # Remove USSD service
                 hass.services.async_remove("notify", services["ussd"])
                 
-                # Удаляем из списка
+                # Remove from list
                 del hass.data[DOMAIN][entry_id]["notify_services"][imei]
                 
                 _LOGGER.info("Removed notify services for device IMEI: %s", imei)
@@ -258,7 +280,7 @@ async def _remove_dongle_services(hass: HomeAssistant, imei: str):
 
 
 async def async_unload_entry_notify(hass: HomeAssistant, entry: ConfigEntry):
-    """Выгрузка notify сервисов при выгрузке конфигурационной записи."""
+    """Unload notify services when configuration entry is unloaded."""
     if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
         if "notify_services" in hass.data[DOMAIN][entry.entry_id]:
             services = hass.data[DOMAIN][entry.entry_id]["notify_services"]
