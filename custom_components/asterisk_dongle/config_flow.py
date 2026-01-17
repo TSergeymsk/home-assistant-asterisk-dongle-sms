@@ -13,7 +13,7 @@ from homeassistant.data_entry_flow import FlowResult
 from homeassistant.exceptions import HomeAssistantError
 
 from .const import DOMAIN, DEFAULT_PORT, DEFAULT_SCAN_INTERVAL
-from .notify import AsteriskManager
+from .manager import AsteriskManager
 
 _LOGGER = logging.getLogger(__name__)
 

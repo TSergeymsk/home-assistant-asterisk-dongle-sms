@@ -47,7 +47,7 @@ async def async_setup_entry(
             )
         )
     
-    async_add_entities(entities, update_before_add=True)
+    async_add_entities(entities, update_before_add=False)
     
     # Регистрируем обработчики для новых устройств
     async def async_add_sensor(device_info):
@@ -67,12 +67,12 @@ async def async_setup_entry(
         f"{SIGNAL_DEVICE_DISCOVERED}_{entry.entry_id}",
         async_add_sensor
     )
-    
-    # TODO: Обработка удаления устройств через entity registry
 
 
 class AsteriskDongleSignalSensor(SensorEntity):
     """Сенсор уровня сигнала dongle."""
+    
+    _attr_has_entity_name = True
     
     def __init__(
         self,
@@ -100,7 +100,7 @@ class AsteriskDongleSignalSensor(SensorEntity):
         self._attr_should_poll = True
         
         # Состояние
-        self._state = None
+        self._attr_native_value = None
         self._attributes = {}
         self._available = True
         

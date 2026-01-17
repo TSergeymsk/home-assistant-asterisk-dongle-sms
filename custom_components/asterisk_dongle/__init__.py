@@ -1,7 +1,6 @@
 """The Asterisk Dongle integration."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import timedelta
 from typing import Any
@@ -23,7 +22,7 @@ from .const import (
     SIGNAL_DEVICE_DISCOVERED,
     SIGNAL_DEVICE_REMOVED,
 )
-from .notify import AsteriskManager
+from .manager import AsteriskManager
 
 _LOGGER = logging.getLogger(__name__)
 

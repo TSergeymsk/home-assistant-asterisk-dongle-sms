@@ -1,8 +1,8 @@
 {
   "domain": "asterisk_dongle",
   "name": "Asterisk Dongle",
-  "documentation": "https://github.com/yourusername/asterisk-dongle",
-  "issue_tracker": "https://github.com/yourusername/asterisk-dongle/issues",
+  "documentation": "https://github.com/your-repo/asterisk-dongle",
+  "issue_tracker": "https://github.com/your-repo/asterisk-dongle/issues",
   "dependencies": [],
   "requirements": [],
   "codeowners": ["@PaulAnnekov","@TSergeymsk"],
