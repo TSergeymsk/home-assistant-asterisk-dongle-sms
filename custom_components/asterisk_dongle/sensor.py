@@ -11,7 +11,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers import device_registry as dr
 
 from .const import (
     DOMAIN,
@@ -60,7 +59,7 @@ async def async_setup_entry(
             entry_id=entry.entry_id
         )
         async_add_entities([new_sensor], update_before_add=True)
-        _LOGGER.info("Added new sensor for device: %s", device_info[ATTR_IMEI])
+        _LOGGER.info("Added new sensor for device with IMEI: %s", device_info[ATTR_IMEI])
     
     @callback
     def async_remove_sensor(imei):
@@ -69,7 +68,7 @@ async def async_setup_entry(
         for entity in entities:
             if hasattr(entity, '_attr_unique_id') and imei in entity.unique_id:
                 hass.async_create_task(entity.async_remove())
-                _LOGGER.info("Removed sensor for device: %s", imei)
+                _LOGGER.info("Removed sensor for device with IMEI: %s", imei)
                 break
     
     # Подписываемся на сигналы
@@ -89,7 +88,7 @@ async def async_setup_entry(
 class AsteriskDongleSignalSensor(SensorEntity):
     """Сенсор уровня сигнала dongle."""
     
-    _attr_has_entity_name = True
+    _attr_has_entity_name = False  # Используем собственное имя без автоматического префикса
     _attr_icon = "mdi:signal"
     
     def __init__(
@@ -105,13 +104,12 @@ class AsteriskDongleSignalSensor(SensorEntity):
         self._device_info = device_info
         self._entry_id = entry_id
         
-        # Уникальный ID - используем только IMEI
+        # Уникальный ID для entity_id: sensor.dongle_<IMEI>_cell_signal
         imei = device_info[ATTR_IMEI]
-        self._attr_unique_id = f"cell_signal_{imei}"
+        self._attr_unique_id = f"dongle_{imei}_cell_signal"
         
-        # Имя сенсора - используем короткий IMEI (последние 6 цифр)
-        imei_short = imei[-6:] if len(imei) >= 6 else imei
-        self._attr_name = f"Cell Signal {imei_short}"
+        # Имя сенсора (отображаемое в интерфейсе)
+        self._attr_name = f"Cell Signal {imei}"
         
         # Атрибуты сенсора
         self._attr_device_class = "signal_strength"
@@ -130,13 +128,24 @@ class AsteriskDongleSignalSensor(SensorEntity):
     def device_info(self):
         """Возвращает информацию об устройстве."""
         imei = self._device_info[ATTR_IMEI]
-        dongle_id = self._device_info[ATTR_DONGLE_ID]
-        imei_short = imei[-6:] if len(imei) >= 6 else imei
+        
+        # Определяем производителя по модели
+        model = self._device_info.get("model", "").upper()
+        manufacturer = "Huawei"  # По умолчанию Huawei для большинства донглов
+        
+        if "ZTE" in model or model.startswith("ZTE"):
+            manufacturer = "ZTE"
+        elif "SIERRA" in model:
+            manufacturer = "Sierra Wireless"
+        elif "NOKIA" in model:
+            manufacturer = "Nokia"
+        elif "ALCATEL" in model:
+            manufacturer = "Alcatel"
         
         return {
             "identifiers": {(DOMAIN, imei)},
-            "name": f"Dongle {dongle_id} ({imei_short})",
-            "manufacturer": self._device_info.get("model", "Unknown"),
+            "name": f"Dongle {imei}",
+            "manufacturer": manufacturer,
             "model": self._device_info.get("model", "Unknown"),
             "sw_version": self._device_info.get("firmware", "Unknown"),
             "via_device": (DOMAIN, self._entry_id),
@@ -152,6 +161,7 @@ class AsteriskDongleSignalSensor(SensorEntity):
             "last_update": self._last_update,
             "provider": self._device_info.get("provider", ""),
             "state": self._device_info.get("state", ""),
+            "device_model": self._device_info.get("model", ""),
         })
         return attrs
 

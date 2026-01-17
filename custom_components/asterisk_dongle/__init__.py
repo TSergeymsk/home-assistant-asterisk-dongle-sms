@@ -175,20 +175,30 @@ async def _create_dongle_device(hass: HomeAssistant, entry: ConfigEntry, device_
     """Создает устройство донгла в реестре устройств."""
     device_registry = dr.async_get(hass)
     
-    identifiers = {(DOMAIN, device_info[ATTR_IMEI])}
+    imei = device_info[ATTR_IMEI]
     
-    imei_short = device_info[ATTR_IMEI][-6:]  # Последние 6 цифр IMEI
-
+    # Определяем производителя по модели
+    model = device_info.get("model", "").upper()
+    manufacturer = "Huawei"  # По умолчанию Huawei для большинства донглов
+    
+    if "ZTE" in model or model.startswith("ZTE"):
+        manufacturer = "ZTE"
+    elif "SIERRA" in model:
+        manufacturer = "Sierra Wireless"
+    elif "NOKIA" in model:
+        manufacturer = "Nokia"
+    elif "ALCATEL" in model:
+        manufacturer = "Alcatel"
+    
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        identifiers=identifiers,
-        name=f"Dongle {device_info[ATTR_DONGLE_ID]} ({imei_short})",
-        manufacturer=device_info.get("model", "Unknown"),
+        identifiers={(DOMAIN, imei)},
+        name=f"Dongle {imei}",  # Имя устройства: Dongle <IMEI>
+        manufacturer=manufacturer,
         model=device_info.get("model", "Unknown"),
         sw_version=device_info.get("firmware", "Unknown"),
         via_device=(DOMAIN, entry.entry_id),
     )
-
 
 def _parse_devices_response(response: str) -> list[dict[str, Any]]:
     """Парсинг ответа 'dongle show devices' из AMI."""
