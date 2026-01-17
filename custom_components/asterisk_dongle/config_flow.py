@@ -42,29 +42,28 @@ def validate_connection(data: dict[str, Any]) -> dict[str, Any]:
             data["password"]
         )
         
-        # Пробуем выполнить простую команду
-        _LOGGER.debug("Sending test command...")
-        response = manager.send_command("core show version")
+        # Тестируем подключение
+        success, message = manager.test_connection()
         
-        _LOGGER.debug("Response received: %s", response[:200] if response else "None")
+        if not success:
+            _LOGGER.error("Connection test failed: %s", message)
+            if "Authentication" in message or "auth" in message.lower():
+                raise InvalidAuth(message)
+            else:
+                raise CannotConnect(message)
         
-        if not response:
-            raise CannotConnect("No response from server")
-            
-        if "Response: Error" in response:
-            # Парсим сообщение об ошибке
-            for line in response.split('\n'):
-                if 'Message:' in line:
-                    error_msg = line.split('Message:', 1)[1].strip()
-                    _LOGGER.error("AMI error: %s", error_msg)
-                    raise InvalidAuth(error_msg)
-            raise InvalidAuth("Authentication failed")
+        _LOGGER.debug("Connection validated successfully: %s", message)
         
-        # Проверяем успешный ответ
-        if "Response: Success" not in response and "Asterisk" not in response:
-            raise CannotConnect("Unexpected response format")
+        # Пробуем получить информацию о донглах
+        response = manager.send_command("dongle show devices")
+        if response and "Response: Error" not in response:
+            _LOGGER.debug("Dongle command successful, found devices")
+        else:
+            _LOGGER.warning("Could not get dongle devices (might be OK if no dongles)")
         
-        _LOGGER.debug("Connection validated successfully")
+        # Закрываем соединение
+        manager.disconnect()
+        
         return {"title": f"Asterisk AMI ({data['host']}:{data['port']})"}
         
     except socket.timeout:
@@ -79,7 +78,6 @@ def validate_connection(data: dict[str, Any]) -> dict[str, Any]:
     except Exception as e:
         _LOGGER.exception("Unexpected error during validation: %s", str(e))
         raise CannotConnect(f"Unexpected error: {str(e)}")
-
 
 class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Конфигурационный поток для Asterisk Dongle."""

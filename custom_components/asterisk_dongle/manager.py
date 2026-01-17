@@ -1,16 +1,14 @@
 """Manager for Asterisk AMI connection."""
 import socket
 import logging
-import asyncio
-from typing import Optional, Any
-from contextlib import asynccontextmanager
+import time
+from typing import Optional, Tuple
 
-# Устанавливаем asyncio-совместимое логирование
 _LOGGER = logging.getLogger(__name__)
 
 
 class AsteriskManager:
-    """Manager for Asterisk AMI connection with improved reliability."""
+    """Manager for Asterisk AMI connection with improved error handling."""
     
     def __init__(self, host: str, port: int, username: str, password: str):
         """Initialize the Asterisk manager."""
@@ -18,126 +16,136 @@ class AsteriskManager:
         self._port = port
         self._username = username
         self._password = password
-        self._client = None
-        self._adapter = None
         self._connected = False
-        self._lock = asyncio.Lock()
+        self._socket: Optional[socket.socket] = None
         
-    def _init_client(self):
-        """Initialize AMI client (synchronous)."""
+    def _connect(self) -> Tuple[bool, str]:
+        """Establish connection to AMI synchronously. Returns (success, error_message)."""
         try:
-            from asterisk.ami import AMIClient, AMIClientAdapter
-            
-            self._client = AMIClient(
-                address=self._host,
-                port=self._port,
-                timeout=10
-            )
-            self._adapter = AMIClientAdapter(self._client)
-            return True
-        except ImportError:
-            _LOGGER.error(
-                "asterisk-ami library not installed. "
-                "Please add 'asterisk-ami' to requirements in manifest.json"
-            )
-            return False
-        except Exception as e:
-            _LOGGER.error("Failed to initialize AMI client: %s", e)
-            return False
-    
-    async def _async_connect(self) -> bool:
-        """Establish connection to AMI asynchronously."""
-        if self._connected:
-            return True
-            
-        async with self._lock:
-            if self._connected:
-                return True
-                
-            try:
-                # Initialize client in executor since it's synchronous
-                import asyncio
-                from functools import partial
-                
-                init_func = partial(self._init_client)
-                success = await asyncio.get_event_loop().run_in_executor(None, init_func)
-                
-                if not success:
-                    return False
-                
-                # Connect and login
-                await asyncio.get_event_loop().run_in_executor(
-                    None, 
-                    lambda: self._client.login(
-                        username=self._username,
-                        secret=self._password
-                    )
-                )
-                
-                # Verify connection by sending a simple command
-                test_response = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self._adapter.Command(command="core show version")
-                )
-                
-                if test_response and test_response.response:
-                    self._connected = True
-                    _LOGGER.info(
-                        "Successfully connected to AMI at %s:%s", 
-                        self._host, self._port
-                    )
-                    return True
-                else:
-                    _LOGGER.error("Connection test failed")
-                    return False
+            if self._socket:
+                try:
+                    self._socket.close()
+                except:
+                    pass
                     
-            except socket.timeout:
-                _LOGGER.error("Connection timeout to %s:%s", self._host, self._port)
-                return False
-            except ConnectionRefusedError:
-                _LOGGER.error("Connection refused to %s:%s", self._host, self._port)
-                return False
-            except Exception as e:
-                _LOGGER.error("Failed to connect to AMI: %s", e)
-                return False
-    
-    async def send_command(self, command: str) -> str:
-        """Send a command to Asterisk via AMI and return the response."""
-        try:
-            # Ensure we're connected
-            if not await self._async_connect():
-                _LOGGER.error("Not connected to AMI")
-                return ""
+            self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self._socket.settimeout(10)
+            self._socket.connect((self._host, self._port))
             
-            # Check if it's a console command or action
-            if command.startswith("dongle show") or command.startswith("core show"):
-                # Use Command action for console commands[citation:1]
-                response = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self._adapter.Command(command=command)
-                )
-            else:
-                # Use SimpleAction for other commands[citation:1]
-                from asterisk.ami import SimpleAction
-                action = SimpleAction('Command', Command=command)
-                response = await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self._client.send_action(action)
-                )
+            # Login to AMI
+            login_action = (
+                f'Action: Login\r\n'
+                f'Username: {self._username}\r\n'
+                f'Secret: {self._password}\r\n'
+                f'\r\n'
+            )
+            self._socket.send(login_action.encode())
+            
+            # Wait for login response
+            time.sleep(0.5)
+            response = self._receive_response()
             
             if not response:
-                _LOGGER.warning("Empty response for command: %s", command)
-                return ""
+                return False, "No response from server"
+                
+            if "Response: Success" in response and "Message: Authentication accepted" in response:
+                self._connected = True
+                _LOGGER.debug("Successfully connected to AMI at %s:%s", self._host, self._port)
+                return True, ""
+            elif "Response: Error" in response:
+                # Parse error message
+                error_msg = "Authentication failed"
+                for line in response.split('\n'):
+                    if 'Message:' in line:
+                        error_msg = line.split('Message:', 1)[1].strip()
+                        break
+                return False, error_msg
+            else:
+                return False, "Unexpected login response format"
+                
+        except socket.timeout:
+            return False, "Connection timeout"
+        except ConnectionRefusedError:
+            return False, "Connection refused"
+        except socket.gaierror:
+            return False, "Invalid hostname or IP address"
+        except Exception as e:
+            return False, f"Connection error: {str(e)}"
+    
+    def _receive_response(self, timeout: float = 5.0) -> str:
+        """Receive full response from AMI."""
+        if not self._socket:
+            return ""
             
-            # Extract response text
-            response_text = self._extract_response_text(response)
-            _LOGGER.debug(
-                "Command '%s' response (first 500 chars): %s",
-                command,
-                response_text[:500] if response_text else "None"
+        response = b""
+        try:
+            self._socket.settimeout(timeout)
+            start_time = time.time()
+            
+            # Read until we get complete AMI response (ends with \r\n\r\n)
+            while True:
+                try:
+                    chunk = self._socket.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+                    
+                    # AMI responses typically end with \r\n\r\n
+                    if response.endswith(b'\r\n\r\n'):
+                        break
+                        
+                    # Also check for other termination patterns
+                    if b'\n\n' in response[-10:]:
+                        break
+                        
+                    # Timeout check
+                    if time.time() - start_time > timeout:
+                        break
+                        
+                except socket.timeout:
+                    # Partial response might be OK
+                    break
+                    
+        except Exception as e:
+            _LOGGER.debug("Error receiving response: %s", e)
+            
+        return response.decode('utf-8', errors='ignore')
+    
+    def send_command(self, command: str) -> str:
+        """Send a command to Asterisk via AMI and return the response synchronously."""
+        try:
+            # Ensure connection
+            if not self._connected:
+                success, error_msg = self._connect()
+                if not success:
+                    _LOGGER.error("Failed to connect: %s", error_msg)
+                    return ""
+            
+            # Send command
+            command_action = (
+                f'Action: Command\r\n'
+                f'Command: {command}\r\n'
+                f'\r\n'
             )
+            self._socket.send(command_action.encode())
             
-            return response_text
+            # Wait for response (shorter wait for command responses)
+            time.sleep(0.5)
+            response = self._receive_response(timeout=3.0)
+            
+            # If no response, try reconnecting and retrying once
+            if not response:
+                _LOGGER.warning("No response for command '%s', reconnecting...", command)
+                self._connected = False
+                success, error_msg = self._connect()
+                if success:
+                    self._socket.send(command_action.encode())
+                    time.sleep(0.5)
+                    response = self._receive_response(timeout=3.0)
+            
+            _LOGGER.debug("Command '%s' got response length: %d", command, len(response) if response else 0)
+            
+            return response or ""
             
         except socket.timeout:
             _LOGGER.error("Socket timeout for command: %s", command)
@@ -147,63 +155,63 @@ class AsteriskManager:
             _LOGGER.error("Connection reset for command: %s", command)
             self._connected = False
             return ""
+        except BrokenPipeError:
+            _LOGGER.error("Broken pipe for command: %s", command)
+            self._connected = False
+            return ""
         except Exception as e:
             _LOGGER.error("Error sending command '%s': %s", command, e)
             return ""
     
-    def _extract_response_text(self, response) -> str:
-        """Extract response text from AMI response object."""
-        try:
-            # Handle different response types
-            if hasattr(response, 'data'):
-                # Response has data attribute
-                return response.data
-            elif hasattr(response, 'response'):
-                # Response object with response attribute
-                if isinstance(response.response, dict):
-                    # Convert dict to string representation
-                    import json
-                    return json.dumps(response.response, indent=2)
-                else:
-                    return str(response.response)
-            elif hasattr(response, '__dict__'):
-                # Try to get all attributes
-                return str(response.__dict__)
-            else:
-                # Fallback to string conversion
-                return str(response)
-        except Exception as e:
-            _LOGGER.debug("Error extracting response text: %s", e)
-            return str(response)
-    
-    async def disconnect(self):
+    def disconnect(self):
         """Disconnect from AMI."""
-        async with self._lock:
-            if self._connected and self._client:
+        try:
+            if self._socket:
+                # Send logout command
                 try:
-                    await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        lambda: self._client.logoff()
-                    )
-                    _LOGGER.debug("Disconnected from AMI")
-                except Exception as e:
-                    _LOGGER.debug("Error during disconnect: %s", e)
-                finally:
-                    self._connected = False
-                    self._client = None
-                    self._adapter = None
+                    logout_action = 'Action: Logoff\r\n\r\n'
+                    self._socket.send(logout_action.encode())
+                    time.sleep(0.1)
+                except:
+                    pass
+                    
+                self._socket.close()
+                _LOGGER.debug("Disconnected from AMI")
+        except:
+            pass
+        finally:
+            self._socket = None
+            self._connected = False
+    
+    def test_connection(self) -> Tuple[bool, str]:
+        """Test connection to AMI with a simple command. Returns (success, message)."""
+        try:
+            response = self.send_command("core show version")
+            if not response:
+                return False, "No response from server"
+                
+            if "Response: Error" in response:
+                # Parse error message
+                error_msg = "Command failed"
+                for line in response.split('\n'):
+                    if 'Message:' in line:
+                        error_msg = line.split('Message:', 1)[1].strip()
+                        break
+                return False, error_msg
+                
+            # Check for success indicators
+            if "Response: Success" in response or "Asterisk" in response:
+                return True, "Connection successful"
+            else:
+                return False, "Unexpected response format"
+                
+        except Exception as e:
+            return False, f"Test failed: {str(e)}"
     
     def is_connected(self) -> bool:
         """Check if connected to AMI."""
         return self._connected
     
-    @asynccontextmanager
-    async def connection(self):
-        """Context manager for AMI connection."""
-        try:
-            if await self._async_connect():
-                yield self
-            else:
-                raise ConnectionError("Failed to connect to AMI")
-        finally:
-            await self.disconnect()
+    def __del__(self):
+        """Destructor to ensure socket is closed."""
+        self.disconnect()
