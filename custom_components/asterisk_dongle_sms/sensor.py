@@ -22,7 +22,23 @@ CONF_SCAN_INTERVAL = 'scan_interval'
 DEFAULT_NAME = "Asterisk Dongle Signal"
 DEFAULT_SCAN_INTERVAL = 60
 
-# Схема с поддержкой строки и числа для scan_interval
+# Кастомный валидатор для scan_interval
+def validate_scan_interval(value):
+    """Validate scan_interval."""
+    if isinstance(value, str):
+        try:
+            value = int(value)
+        except ValueError:
+            raise vol.Invalid(f"Invalid scan_interval value: {value}")
+    
+    if not isinstance(value, int):
+        raise vol.Invalid(f"scan_interval must be integer, got {type(value)}")
+    
+    if value <= 0:
+        raise vol.Invalid(f"scan_interval must be positive, got {value}")
+    
+    return value
+
 PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
     {
         vol.Required(CONF_DONGLE): cv.string,
@@ -31,8 +47,7 @@ PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
         vol.Required(CONF_USER): cv.string,
         vol.Required(CONF_PASSWORD): cv.string,
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): 
-            vol.Any(cv.positive_int, cv.string),
+        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): validate_scan_interval,
     }
 )
 
@@ -45,36 +60,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     password = config[CONF_PASSWORD]
     dongle = config[CONF_DONGLE]
     name = config[CONF_NAME]
-    
-    # Обрабатываем scan_interval
-    scan_interval = config.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
-    
-    # Преобразуем в int, если это строка
-    if isinstance(scan_interval, str):
-        try:
-            scan_interval = int(scan_interval)
-        except ValueError:
-            _LOGGER.warning(
-                "Invalid scan_interval value: %s, using default: %s",
-                scan_interval, DEFAULT_SCAN_INTERVAL
-            )
-            scan_interval = DEFAULT_SCAN_INTERVAL
-    
-    # Гарантируем, что это int
-    if not isinstance(scan_interval, int):
-        _LOGGER.warning(
-            "scan_interval is not an integer: %s, using default: %s",
-            type(scan_interval).__name__, DEFAULT_SCAN_INTERVAL
-        )
-        scan_interval = DEFAULT_SCAN_INTERVAL
-    
-    # Проверяем, что значение положительное
-    if scan_interval <= 0:
-        _LOGGER.warning(
-            "scan_interval must be positive: %s, using default: %s",
-            scan_interval, DEFAULT_SCAN_INTERVAL
-        )
-        scan_interval = DEFAULT_SCAN_INTERVAL
+    scan_interval = config[CONF_SCAN_INTERVAL]
     
     # Создаем менеджер AMI
     ami = AsteriskManager(address, port, user, password)
