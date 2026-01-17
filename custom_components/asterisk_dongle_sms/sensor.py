@@ -139,6 +139,9 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 self._state = None
                 return
             
+            # Отладочный вывод сырого ответа
+            _LOGGER.debug("Raw AMI response (first 300 chars): %s", response[:300])
+            
             # Парсим ответ
             data = self._parse_dongle_state(response)
             
@@ -147,6 +150,8 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 self._available = False
                 self._state = None
                 return
+            
+            _LOGGER.debug("Parsed data keys: %s", list(data.keys()))
             
             # Извлекаем уровень сигнала в dBm
             rssi_str = data.get("rssi", "")
@@ -204,35 +209,37 @@ class AsteriskDongleSignalSensor(SensorEntity):
             self._available = False
             self._state = None
 
-def _parse_dongle_state(self, response):
-    """Parse dongle state response from AMI with proper handling."""
-    data = {}
-    
-    # Ищем блок с данными dongle
-    lines = response.split('\n')
-    in_output_block = False
-    
-    for line in lines:
-        line = line.strip()
+    def _parse_dongle_state(self, response):
+        """Parse dongle state response from AMI with proper handling."""
+        data = {}
         
-        # Начало блока данных
-        if "Command output follows" in line:
-            in_output_block = True
-            continue
+        # Ищем блок с данными dongle
+        lines = response.split('\n')
+        in_output_block = False
+        
+        for line in lines:
+            line = line.strip()
             
-        # Конец блока данных
-        if line == "" and in_output_block:
-            break
-            
-        if in_output_block and line.startswith("Output:"):
-            # Убираем "Output:" и обрабатываем
-            content = line[7:].strip()
-            if ":" in content:
-                key, value = content.split(":", 1)
-                key = key.strip().lower().replace(" ", "_")
-                data[key] = value.strip()
-    
-    return data
+            # Начало блока данных
+            if "Command output follows" in line:
+                in_output_block = True
+                continue
+                
+            # Конец блока данных (пустая строка после блока)
+            if line == "" and in_output_block:
+                # Можно break, если хотим только первый блок
+                in_output_block = False
+                continue
+                
+            if in_output_block and line.startswith("Output:"):
+                # Убираем "Output:" и обрабатываем
+                content = line[7:].strip()
+                if ":" in content:
+                    key, value = content.split(":", 1)
+                    key = key.strip().lower().replace(" ", "_")
+                    data[key] = value.strip()
+        
+        return data
 
     @property
     def icon(self):
@@ -252,4 +259,3 @@ def _parse_dongle_state(self, response):
                 return "mdi:signal-off"
         except (ValueError, TypeError):
             return "mdi:signal"
-
