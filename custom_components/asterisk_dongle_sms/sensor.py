@@ -22,23 +22,7 @@ CONF_SCAN_INTERVAL = 'scan_interval'
 DEFAULT_NAME = "Asterisk Dongle Signal"
 DEFAULT_SCAN_INTERVAL = 60
 
-# Кастомный валидатор для scan_interval
-def validate_scan_interval(value):
-    """Validate scan_interval."""
-    if isinstance(value, str):
-        try:
-            value = int(value)
-        except ValueError:
-            raise vol.Invalid(f"Invalid scan_interval value: {value}")
-    
-    if not isinstance(value, int):
-        raise vol.Invalid(f"scan_interval must be integer, got {type(value)}")
-    
-    if value <= 0:
-        raise vol.Invalid(f"scan_interval must be positive, got {value}")
-    
-    return value
-
+# Используем встроенный валидатор time_period, который преобразует в timedelta
 PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
     {
         vol.Required(CONF_DONGLE): cv.string,
@@ -47,7 +31,7 @@ PLATFORM_SCHEMA = cv.PLATFORM_SCHEMA.extend(
         vol.Required(CONF_USER): cv.string,
         vol.Required(CONF_PASSWORD): cv.string,
         vol.Optional(CONF_NAME, default=DEFAULT_NAME): cv.string,
-        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): validate_scan_interval,
+        vol.Optional(CONF_SCAN_INTERVAL, default=DEFAULT_SCAN_INTERVAL): cv.time_period,
     }
 )
 
@@ -60,7 +44,26 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     password = config[CONF_PASSWORD]
     dongle = config[CONF_DONGLE]
     name = config[CONF_NAME]
-    scan_interval = config[CONF_SCAN_INTERVAL]
+    
+    # scan_interval теперь timedelta (от cv.time_period)
+    scan_interval_td = config.get(CONF_SCAN_INTERVAL)
+    
+    # Преобразуем timedelta в секунды (int)
+    if isinstance(scan_interval_td, timedelta):
+        scan_interval = int(scan_interval_td.total_seconds())
+        _LOGGER.debug("Converted timedelta %s to %s seconds", scan_interval_td, scan_interval)
+    else:
+        # На случай, если это не timedelta
+        try:
+            scan_interval = int(scan_interval_td)
+        except (TypeError, ValueError):
+            scan_interval = DEFAULT_SCAN_INTERVAL
+            _LOGGER.warning("Invalid scan_interval, using default: %s", scan_interval)
+    
+    # Проверяем, что значение положительное
+    if scan_interval <= 0:
+        _LOGGER.warning("scan_interval must be positive, using default: %s", DEFAULT_SCAN_INTERVAL)
+        scan_interval = DEFAULT_SCAN_INTERVAL
     
     # Создаем менеджер AMI
     ami = AsteriskManager(address, port, user, password)
