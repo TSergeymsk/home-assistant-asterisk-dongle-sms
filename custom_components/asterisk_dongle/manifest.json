@@ -4,7 +4,7 @@
   "documentation": "https://github.com/TSergeymsk/home-assistant-asterisk-dongle-sms",
   "issue_tracker": "https://github.com/TSergeymsk/home-assistant-asterisk-dongle-sms/issues",
   "dependencies": [],
-  "requirements": [],
+  "requirements": ["asterisk-ami>=0.1.7"],
   "codeowners": ["@PaulAnnekov","@TSergeymsk"],
   "config_flow": true,
   "version": "2.3.0",
