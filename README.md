@@ -1,10 +1,11 @@
 # Home Assistant SMS Notification via Asterisk AMI DongleSendSMS/USSD
+# Asterisk Integration for Home Assistant via Asterisk AMI. Send SMS/USSD, get USB Dongle statistic and network strength
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
 
-This notification component allows you to send SMS via your GSM dongle connected to Asterisk via 
-[chan_dongle](https://github.com/bg111/asterisk-chan-dongle) driver. It uses Asterisk AMI api to send DongleSendSMS 
-command.
+This custom allows you to send SMS and USSD codes via your GSM dongle connected to Asterisk via 
+[chan_dongle](https://github.com/bg111/asterisk-chan-dongle) driver. It uses Asterisk AMI api to send DongleSendSMS/USSD
+command. It also allows you to monitor network signal on the USB stick.
 
 ## Installation
 
@@ -14,7 +15,7 @@ command.
 
 ### Manual
 
-Copy `custom_components/asterisk_dongle_sms/` contents from repo into `custom_components/asterisk_dongle_sms/` 
+Copy `custom_components/asterisk_dongle/` contents from repo into `custom_components/asterisk_dongle/` 
    [directory](https://home-assistant.io/developers/component_loading/).
 
 ## Configuration
@@ -35,34 +36,16 @@ Copy `custom_components/asterisk_dongle_sms/` contents from repo into `custom_co
    # user password
    secret=your_password
    # privileges, that's all we need for calling DongleSendSMS
-   read=call
-   write=call
+   read=all
+   write=all
    ```
    
    Restart Asterisk.
    
-2. Add the following lines to the `configuration.yaml`:
+2. Add the integration Asterisk Dongle via Home Assistant UI. Provide AMI connectivity information (host, port, username and password) and scan_interval.
 
-  ```yaml
-  notify:
-    - name: sms
-      platform: asterisk_dongle_sms
-      dongle: dongle0 # insert your dongle name, run `dongle show devices` in Asterisk CLI and check `ID` column
-      address: localhost # Asterisk server IP address
-      port: 5038 # Asterisk AMI port
-      user: smart-home # Asterisk AMI user name
-      password: your_password # Asterisk AMI user password
-      dngtype: sms #sms for sms, ussd for ussd
+3. The integration creates devices and sensors for each dongle, connected to Asterisk (named sensor.cell_signal_<IMEI>) and 2 notification servives for SMS (notify.sms_<IMEI>) and USSD (notify.ussd_<IMEI>).
+  
+4. Add [automation](https://home-assistant.io/docs/automation/action/).
 
-  sensor:
-  - platform: asterisk_dongle_sms
-    dongle: dongle0
-    address: !secret asterisk_host
-    port: !secret asterisk_port
-    user: !secret asterisk_username
-    password: !secret asterisk_password
-    name: "Cellular Signal"
-    scan_interval: 60
-  ```
-
-5. Add [automation](https://home-assistant.io/docs/automation/action/).
+Written by Deepseek.
