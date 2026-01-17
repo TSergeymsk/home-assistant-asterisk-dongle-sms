@@ -13,7 +13,6 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.service import async_set_service_schema
-from homeassistant.helpers import device_registry as dr
 
 from .const import (
     DOMAIN,
@@ -30,21 +29,6 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-SERVICE_SMS = "asterisk_dongle_sms"
-SERVICE_USSD = "asterisk_dongle_ussd"
-
-# Схемы валидации для сервисов - теперь с селектором устройств
-SMS_SERVICE_SCHEMA = vol.Schema({
-    vol.Required("target"): cv.string,  # ID устройства в HA
-    vol.Required(ATTR_NUMBER): cv.string,
-    vol.Required(ATTR_MESSAGE): cv.string,
-})
-
-USSD_SERVICE_SCHEMA = vol.Schema({
-    vol.Required("target"): cv.string,  # ID устройства в HA
-    vol.Required(ATTR_USSD_CODE): cv.string,
-})
-
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -56,47 +40,57 @@ async def async_setup_entry(
     manager = data[DATA_ASTERISK_MANAGER]
     devices = data[DATA_DEVICES]
 
-    # Получаем реестр устройств
-    device_registry = dr.async_get(hass)
+    # Создаем сервисы для существующих устройств
+    for imei, device_info in devices.items():
+        await _create_dongle_services(hass, manager, device_info, entry.entry_id)
 
-    # Функция для получения IMEI по ID устройства HA
-    def get_imei_from_device_id(device_id: str) -> str | None:
-        """Извлекает IMEI из идентификаторов устройства."""
-        try:
-            device = device_registry.async_get(device_id)
-            if device:
-                # Ищем идентификатор вида (DOMAIN, IMEI)
-                for identifier in device.identifiers:
-                    if identifier[0] == DOMAIN:
-                        return identifier[1]
-        except Exception as e:
-            _LOGGER.warning("Error getting device info: %s", e)
-        return None
+    # Обработчики для обновления списка устройств
+    @callback
+    async def handle_device_discovered(device_info):
+        """Добавить сервисы для нового устройства."""
+        await _create_dongle_services(hass, manager, device_info, entry.entry_id)
+        _LOGGER.info("Added notify services for device: %s", device_info[ATTR_IMEI])
 
-    # Регистрируем сервисы для SMS и USSD
+    @callback
+    async def handle_device_removed(imei):
+        """Удалить сервисы для устройства."""
+        await _remove_dongle_services(hass, imei)
+        _LOGGER.info("Removed notify services for device: %s", imei)
+
+    # Подписываемся на сигналы
+    async_dispatcher_connect(
+        hass,
+        f"{SIGNAL_DEVICE_DISCOVERED}_{entry.entry_id}",
+        handle_device_discovered
+    )
+    
+    async_dispatcher_connect(
+        hass,
+        f"{SIGNAL_DEVICE_REMOVED}_{entry.entry_id}",
+        handle_device_removed
+    )
+
+
+async def _create_dongle_services(
+    hass: HomeAssistant, 
+    manager, 
+    device_info: dict[str, Any], 
+    entry_id: str
+):
+    """Создает сервисы нотификации для донгла."""
+    imei = device_info[ATTR_IMEI]
+    dongle_id = device_info[ATTR_DONGLE_ID]
+    imei_short = imei[-6:] if len(imei) >= 6 else imei
+    
+    # Имена сервисов
+    service_sms = f"asterisk_dongle_sms_{imei_short}"
+    service_ussd = f"asterisk_dongle_ussd_{imei_short}"
+
+    # Регистрируем сервис отправки SMS
     async def async_sms_service(call: ServiceCall):
         """Обработчик сервиса отправки SMS."""
-        target_device_id = call.data.get("target")  # ID устройства в HA
         number = call.data.get(ATTR_NUMBER)
         message = call.data.get(ATTR_MESSAGE)
-
-        if not target_device_id:
-            _LOGGER.error("Target device is required for SMS")
-            return
-
-        # Получаем IMEI из ID устройства
-        imei = get_imei_from_device_id(target_device_id)
-        if not imei:
-            _LOGGER.error("Could not get IMEI from device ID %s", target_device_id)
-            return
-
-        # Находим устройство по IMEI
-        if imei not in devices:
-            _LOGGER.error("Device with IMEI %s not found", imei)
-            return
-
-        device_info = devices[imei]
-        dongle_id = device_info[ATTR_DONGLE_ID]
 
         if not number:
             _LOGGER.error("Number is required for SMS")
@@ -128,28 +122,10 @@ async def async_setup_entry(
         else:
             _LOGGER.info("SMS sent to %s via %s", number, dongle_id)
 
+    # Регистрируем сервис отправки USSD
     async def async_ussd_service(call: ServiceCall):
         """Обработчик сервиса отправки USSD."""
-        target_device_id = call.data.get("target")  # ID устройства в HA
         ussd_code = call.data.get(ATTR_USSD_CODE)
-
-        if not target_device_id:
-            _LOGGER.error("Target device is required for USSD")
-            return
-
-        # Получаем IMEI из ID устройства
-        imei = get_imei_from_device_id(target_device_id)
-        if not imei:
-            _LOGGER.error("Could not get IMEI from device ID %s", target_device_id)
-            return
-
-        # Находим устройство по IMEI
-        if imei not in devices:
-            _LOGGER.error("Device with IMEI %s not found", imei)
-            return
-
-        device_info = devices[imei]
-        dongle_id = device_info[ATTR_DONGLE_ID]
 
         if not ussd_code:
             _LOGGER.error("USSD code is required")
@@ -177,119 +153,100 @@ async def async_setup_entry(
         else:
             _LOGGER.info("USSD request sent via %s: %s", dongle_id, ussd_code)
 
-    # Регистрируем сервисы
+    # Регистрируем сервисы в Home Assistant
     hass.services.async_register(
         domain="notify",
-        service=SERVICE_SMS,
+        service=service_sms,
         service_func=async_sms_service,
-        schema=SMS_SERVICE_SCHEMA,
+        schema=vol.Schema({
+            vol.Required(ATTR_NUMBER): cv.string,
+            vol.Required(ATTR_MESSAGE): cv.string,
+        }),
     )
 
     hass.services.async_register(
         domain="notify",
-        service=SERVICE_USSD,
+        service=service_ussd,
         service_func=async_ussd_service,
-        schema=USSD_SERVICE_SCHEMA,
+        schema=vol.Schema({
+            vol.Required(ATTR_USSD_CODE): cv.string,
+        }),
     )
 
-    # Создаем схему для отображения в UI с селектором устройств
-    service_schema = {
-        "description": "Send SMS via Asterisk Dongle",
+    # Устанавливаем схемы сервисов для отображения в UI
+    sms_schema = {
+        "description": f"Send SMS via {dongle_id} ({imei_short})",
         "fields": {
-            "target": {
-                "name": "Dongle Device",
-                "description": "Select the dongle device",
-                "required": True,
-                "selector": {
-                    "device": {
-                        "integration": DOMAIN,
-                        "multiple": False
-                    }
-                }
-            },
             ATTR_NUMBER: {
                 "name": "Phone Number",
                 "description": "Phone number to send SMS to",
                 "required": True,
-                "selector": {
-                    "text": {}
-                }
+                "selector": {"text": {}}
             },
             ATTR_MESSAGE: {
                 "name": "Message",
                 "description": "Text of the SMS message",
                 "required": True,
-                "selector": {
-                    "text": {}
-                }
+                "selector": {"text": {}}
             }
         }
     }
 
-    # Устанавливаем схемы сервисов для отображения в UI
-    await async_set_service_schema(
-        hass,
-        "notify",
-        SERVICE_SMS,
-        service_schema
-    )
-
-    # Для USSD используем аналогичную схему, но с другим полем вместо message
-    ussd_schema = service_schema.copy()
-    ussd_schema["description"] = "Send USSD request via Asterisk Dongle"
-    ussd_schema["fields"] = ussd_schema["fields"].copy()
-    del ussd_schema["fields"][ATTR_MESSAGE]
-    del ussd_schema["fields"][ATTR_NUMBER]
-    ussd_schema["fields"][ATTR_USSD_CODE] = {
-        "name": "USSD Code",
-        "description": "USSD code to send (e.g., *100#)",
-        "required": True,
-        "selector": {
-            "text": {}
+    ussd_schema = {
+        "description": f"Send USSD request via {dongle_id} ({imei_short})",
+        "fields": {
+            ATTR_USSD_CODE: {
+                "name": "USSD Code",
+                "description": "USSD code to send (e.g., *100#)",
+                "required": True,
+                "selector": {"text": {}}
+            }
         }
     }
 
-    await async_set_service_schema(
-        hass,
-        "notify",
-        SERVICE_USSD,
-        ussd_schema
-    )
+    await async_set_service_schema(hass, "notify", service_sms, sms_schema)
+    await async_set_service_schema(hass, "notify", service_ussd, ussd_schema)
 
-    _LOGGER.info("Notify services for Asterisk Dongle registered with UI schemas")
-
-    # Обработчики для обновления списка устройств
-    @callback
-    def handle_device_discovered(device_info):
-        """Обновляем список устройств при обнаружении нового."""
-        # Обновляем devices в data
-        devices[device_info[ATTR_IMEI]] = device_info
-        _LOGGER.debug("Device list updated, now %d devices", len(devices))
-
-    @callback
-    def handle_device_removed(imei):
-        """Удаляем устройство из списка."""
-        if imei in devices:
-            del devices[imei]
-            _LOGGER.debug("Device %s removed from list", imei)
-
-    # Подписываемся на сигналы
-    async_dispatcher_connect(
-        hass,
-        f"{SIGNAL_DEVICE_DISCOVERED}_{entry.entry_id}",
-        handle_device_discovered
-    )
+    # Сохраняем информацию о сервисах для возможности удаления
+    if "notify_services" not in hass.data[DOMAIN][entry_id]:
+        hass.data[DOMAIN][entry_id]["notify_services"] = {}
     
-    async_dispatcher_connect(
-        hass,
-        f"{SIGNAL_DEVICE_REMOVED}_{entry.entry_id}",
-        handle_device_removed
-    )
+    hass.data[DOMAIN][entry_id]["notify_services"][imei] = {
+        "sms": service_sms,
+        "ussd": service_ussd
+    }
+
+    _LOGGER.info("Created notify services for device %s (IMEI: %s)", dongle_id, imei)
+
+
+async def _remove_dongle_services(hass: HomeAssistant, imei: str):
+    """Удаляет сервисы нотификации для устройства."""
+    # Находим entry_id для этого устройства
+    for entry_id in hass.data.get(DOMAIN, {}):
+        entry_data = hass.data[DOMAIN].get(entry_id, {})
+        if "notify_services" in entry_data and imei in entry_data["notify_services"]:
+            services = entry_data["notify_services"][imei]
+            
+            try:
+                # Удаляем сервис SMS
+                hass.services.async_remove("notify", services["sms"])
+                # Удаляем сервис USSD
+                hass.services.async_remove("notify", services["ussd"])
+                
+                # Удаляем из списка
+                del hass.data[DOMAIN][entry_id]["notify_services"][imei]
+                
+                _LOGGER.info("Removed notify services for device IMEI: %s", imei)
+            except (ValueError, KeyError) as err:
+                _LOGGER.warning("Error removing services for %s: %s", imei, err)
+            break
 
 
 async def async_unload_entry_notify(hass: HomeAssistant, entry: ConfigEntry):
     """Выгрузка notify сервисов при выгрузке конфигурационной записи."""
-    # Удаляем сервисы
-    hass.services.async_remove(domain="notify", service=SERVICE_SMS)
-    hass.services.async_remove(domain="notify", service=SERVICE_USSD)
-    _LOGGER.info("Notify services for Asterisk Dongle unloaded")
+    if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
+        if "notify_services" in hass.data[DOMAIN][entry.entry_id]:
+            services = hass.data[DOMAIN][entry.entry_id]["notify_services"]
+            for imei in list(services.keys()):
+                await _remove_dongle_services(hass, imei)
+        _LOGGER.info("All notify services for Asterisk Dongle unloaded")
