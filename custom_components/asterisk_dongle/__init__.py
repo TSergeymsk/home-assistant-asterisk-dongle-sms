@@ -193,54 +193,60 @@ def _parse_devices_response(response: str) -> list[dict[str, Any]]:
     devices = []
     lines = response.split('\n')
     in_output_block = False
+    header_found = False
 
     for line in lines:
         line = line.strip()
 
-        # Начало блока с данными может быть обозначено по-разному
-        if "Command output follows" in line or "Output:" in line:
+        # 1. Ищем начало блока с данными
+        if not in_output_block and ("Command output follows" in line or "Output:" in line):
             in_output_block = True
-            # Пропускаем заголовок, если он в следующей строке
             continue
-
         if not in_output_block:
+            continue  # Пропускаем строки до блока с выводом команды
+
+        # 2. Ищем строку-заголовок таблицы (начинается с "ID" и содержит "Group")
+        if not header_found and line.startswith("ID") and "Group" in line:
+            header_found = True
             continue
 
-        # Конец блока данных
-        if line == "" or line.startswith("--END COMMAND--"):
-            break
-
-        # Парсим строку с данными, пропуская разделители
+        # 3. Пропускаем разделители и пустые строки
         if line.startswith("---") or not line:
             continue
 
-        # Разделяем строку по пробелам, но объединяем многословные названия провайдеров
-        parts = re.split(r'\s+', line)
+        # 4. Конец блока данных (AMI обычно добавляет пустую строку или маркер)
+        if line == "--END COMMAND--":
+            break
+
+        # 5. Парсим строку с данными об устройстве
+        # Разделяем строку по пробелам, удаляя пустые элементы
+        parts = [part for part in line.split(' ') if part]
+
+        # Проверяем, что строка содержит достаточно данных (минимум 10 полей, как в вашем примере)
         if len(parts) >= 10:
-            # Провайдер может состоять из нескольких слов, объединяем их
-            if len(parts) > 12:
-                provider_parts = parts[6:-(len(parts) - 12)]
-                provider = " ".join(provider_parts)
-                parts = parts[:6] + [provider] + parts[-(len(parts) - 12):]
-
-            device = {
-                ATTR_DONGLE_ID: parts[0],
-                "group": parts[1] if len(parts) > 1 else "",
-                "state": parts[2] if len(parts) > 2 else "",
-                "rssi_raw": parts[3] if len(parts) > 3 else "",
-                "mode": parts[4] if len(parts) > 4 else "",
-                "submode": parts[5] if len(parts) > 5 else "",
-                "provider": parts[6] if len(parts) > 6 else "",
-                "model": parts[7] if len(parts) > 7 else "",
-                "firmware": parts[8] if len(parts) > 8 else "",
-                ATTR_IMEI: parts[9] if len(parts) > 9 else "",
-                "imsi": parts[10] if len(parts) > 10 else "",
-                "number": parts[11] if len(parts) > 11 else "Unknown",
-            }
-            devices.append(device)
+            try:
+                device = {
+                    ATTR_DONGLE_ID: parts[0],        # dongle0
+                    "group": parts[1],               # 0
+                    "state": parts[2],               # Free
+                    "rssi_raw": parts[3],            # 26
+                    "mode": parts[4],                # 3
+                    "submode": parts[5],             # 3
+                    "provider": parts[6],            # beeline
+                    "model": parts[7],               # E173
+                    "firmware": parts[8],            # 11.126.85.00.209
+                    ATTR_IMEI: parts[9],             # 357291041830484
+                    "imsi": parts[10] if len(parts) > 10 else "",          # 250997278767099
+                    "number": parts[11] if len(parts) > 11 else "Unknown", # Unknown
+                }
+                devices.append(device)
+                _LOGGER.debug("Successfully parsed device: %s", device[ATTR_DONGLE_ID])
+            except IndexError as e:
+                _LOGGER.warning("Error parsing line, not enough fields: %s. Error: %s", line, e)
         else:
-            _LOGGER.debug("Skipping line (not enough parts): %s", line)
+            _LOGGER.warning("Skipping line, unexpected format (only %d parts): %s", len(parts), line)
 
+    _LOGGER.info("Parsed %d devices from response", len(devices))
     return devices
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
