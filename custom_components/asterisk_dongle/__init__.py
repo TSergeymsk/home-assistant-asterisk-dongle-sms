@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import timedelta
 from typing import Any
 
@@ -10,6 +11,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from homeassistant.helpers import device_registry as dr
 
 from .const import (
     DOMAIN,
@@ -28,9 +30,13 @@ _LOGGER = logging.getLogger(__name__)
 
 PLATFORMS = [Platform.NOTIFY, Platform.SENSOR]
 
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Настройка интеграции из ConfigEntry."""
     hass.data.setdefault(DOMAIN, {})
+    
+    _LOGGER.info("Setting up Asterisk Dongle integration for %s:%s", 
+                 entry.data["host"], entry.data["port"])
     
     # Создаем менеджер AMI
     manager = AsteriskManager(
@@ -40,12 +46,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry.data["password"]
     )
     
+    # Проверяем подключение
+    try:
+        test_response = await hass.async_add_executor_job(
+            manager.send_command, "core show version"
+        )
+        if not test_response or "Response: Error" in test_response:
+            _LOGGER.error("Failed to connect to Asterisk AMI")
+            return False
+    except Exception as e:
+        _LOGGER.error("Error testing AMI connection: %s", e)
+        return False
+    
     # Сохраняем данные
     hass.data[DOMAIN][entry.entry_id] = {
         DATA_CONFIG_ENTRY: entry,
         DATA_ASTERISK_MANAGER: manager,
         DATA_DEVICES: {},
     }
+    
+    # Создаем главное устройство для интеграции
+    await _create_main_device(hass, entry)
     
     # Первоначальное обнаружение устройств
     await _discover_devices(hass, entry)
@@ -65,6 +86,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def _create_main_device(hass: HomeAssistant, entry: ConfigEntry):
+    """Создает главное устройство для интеграции."""
+    device_registry = dr.async_get(hass)
+    
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, entry.entry_id)},
+        name=f"Asterisk AMI ({entry.data['host']})",
+        manufacturer="Asterisk",
+        model="AMI Gateway",
+        sw_version="1.0",
+    )
+
+
 async def _discover_devices(hass: HomeAssistant, entry: ConfigEntry):
     """Обнаружение устройств dongle через AMI."""
     data = hass.data[DOMAIN][entry.entry_id]
@@ -78,23 +113,40 @@ async def _discover_devices(hass: HomeAssistant, entry: ConfigEntry):
         )
         
         if not response:
-            _LOGGER.error("No response from Asterisk for device discovery")
+            _LOGGER.debug("No response from Asterisk for device discovery")
             return
+        
+        _LOGGER.debug("Raw response from 'dongle show devices':\n%s", response)
         
         # Парсим ответ
         discovered_devices = _parse_devices_response(response)
-        _LOGGER.debug("Discovered %d devices", len(discovered_devices))
+        _LOGGER.info("Discovered %d devices", len(discovered_devices))
+        
+        if not discovered_devices:
+            _LOGGER.warning("No devices found in response")
+            return
         
         # Создаем словарь для быстрого доступа по IMEI
         new_devices = {}
         for device in discovered_devices:
             imei = device[ATTR_IMEI]
+            dongle_id = device[ATTR_DONGLE_ID]
+            
+            if not imei or imei == "N/A":
+                _LOGGER.warning("Device %s has no IMEI, skipping", dongle_id)
+                continue
+                
             new_devices[imei] = device
             
             # Если устройство новое - отправляем сигнал
             if imei not in current_devices:
-                _LOGGER.info("New device discovered: %s (IMEI: %s)", 
-                           device[ATTR_DONGLE_ID], imei)
+                _LOGGER.info("New device discovered: %s (IMEI: %s, Model: %s)", 
+                           dongle_id, imei, device.get("model", "Unknown"))
+                
+                # Создаем устройство в реестре устройств
+                await _create_dongle_device(hass, entry, device)
+                
+                # Отправляем сигнал для создания сущностей
                 async_dispatcher_send(
                     hass, 
                     f"{SIGNAL_DEVICE_DISCOVERED}_{entry.entry_id}", 
@@ -102,9 +154,10 @@ async def _discover_devices(hass: HomeAssistant, entry: ConfigEntry):
                 )
         
         # Проверяем удаленные устройства
-        for imei in list(current_devices.keys()):
+        for imei, device_info in list(current_devices.items()):
             if imei not in new_devices:
-                _LOGGER.info("Device removed: %s", imei)
+                dongle_id = device_info[ATTR_DONGLE_ID]
+                _LOGGER.info("Device removed: %s (IMEI: %s)", dongle_id, imei)
                 async_dispatcher_send(
                     hass,
                     f"{SIGNAL_DEVICE_REMOVED}_{entry.entry_id}",
@@ -115,43 +168,83 @@ async def _discover_devices(hass: HomeAssistant, entry: ConfigEntry):
         data[DATA_DEVICES] = new_devices
         
     except Exception as e:
-        _LOGGER.error("Error discovering devices: %s", e)
+        _LOGGER.error("Error discovering devices: %s", e, exc_info=True)
+
+
+async def _create_dongle_device(hass: HomeAssistant, entry: ConfigEntry, device_info: dict):
+    """Создает устройство донгла в реестре устройств."""
+    device_registry = dr.async_get(hass)
+    
+    identifiers = {(DOMAIN, device_info[ATTR_IMEI])}
+    
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers=identifiers,
+        name=f"Dongle {device_info[ATTR_DONGLE_ID]}",
+        manufacturer=device_info.get("model", "Unknown"),
+        model=device_info.get("model", "Unknown"),
+        sw_version=device_info.get("firmware", "Unknown"),
+        via_device=(DOMAIN, entry.entry_id),
+    )
 
 
 def _parse_devices_response(response: str) -> list[dict[str, Any]]:
     """Парсинг ответа 'dongle show devices'."""
     devices = []
-    lines = response.split('\n')
     
-    # Пропускаем заголовки до строки с данными
-    start_parsing = False
+    # Ищем блок с выводом команды
+    if "Command output follows" not in response:
+        _LOGGER.warning("No command output found in response")
+        return devices
+    
+    # Извлекаем только блок вывода
+    lines = response.split('\n')
+    in_output = False
+    output_lines = []
+    
     for line in lines:
-        line = line.strip()
-        
-        # Начало таблицы данных
-        if line.startswith("---"):
-            start_parsing = True
+        if "Command output follows" in line:
+            in_output = True
+            continue
+        if in_output and line.strip() == "":
+            break
+        if in_output:
+            output_lines.append(line.strip())
+    
+    # Парсим каждую строку с данными
+    for line in output_lines:
+        if not line or line.startswith("---"):
             continue
             
-        if start_parsing and line:
-            # Парсим строку с данными
-            parts = line.split()
-            if len(parts) >= 10:
-                device = {
-                    ATTR_DONGLE_ID: parts[0],  # dongle0, dongle1
-                    "group": parts[1],
-                    "state": parts[2],
-                    "rssi_raw": parts[3],
-                    "mode": parts[4],
-                    "submode": parts[5],
-                    "provider": parts[6],
-                    "model": parts[7],
-                    "firmware": parts[8],
-                    ATTR_IMEI: parts[9],
-                    "imsi": parts[10] if len(parts) > 10 else "",
-                    "number": parts[11] if len(parts) > 11 else "Unknown",
-                }
-                devices.append(device)
+        # Разбиваем строку на части, объединяя длинные поля
+        # Формат: dongleX group state rssi mode submode provider model firmware imei imsi number
+        parts = re.split(r'\s+', line)
+        
+        if len(parts) >= 10:
+            # Объединяем поля провайдера, если есть пробелы
+            if len(parts) > 12:
+                # Провайдер может состоять из нескольких слов
+                provider_parts = parts[6:-(len(parts)-12)]
+                provider = " ".join(provider_parts)
+                parts = parts[:6] + [provider] + parts[-(len(parts)-12):]
+            
+            device = {
+                ATTR_DONGLE_ID: parts[0],
+                "group": parts[1] if len(parts) > 1 else "",
+                "state": parts[2] if len(parts) > 2 else "",
+                "rssi_raw": parts[3] if len(parts) > 3 else "",
+                "mode": parts[4] if len(parts) > 4 else "",
+                "submode": parts[5] if len(parts) > 5 else "",
+                "provider": parts[6] if len(parts) > 6 else "",
+                "model": parts[7] if len(parts) > 7 else "",
+                "firmware": parts[8] if len(parts) > 8 else "",
+                ATTR_IMEI: parts[9] if len(parts) > 9 else "",
+                "imsi": parts[10] if len(parts) > 10 else "",
+                "number": parts[11] if len(parts) > 11 else "Unknown",
+            }
+            devices.append(device)
+        else:
+            _LOGGER.debug("Skipping line (not enough parts): %s", line)
     
     return devices
 
@@ -159,15 +252,21 @@ def _parse_devices_response(response: str) -> list[dict[str, Any]]:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Выгрузка конфигурационной записи."""
     # Останавливаем discovery
-    if "discovery_job" in hass.data[DOMAIN][entry.entry_id]:
-        hass.data[DOMAIN][entry.entry_id]["discovery_job"]()
+    if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
+        if "discovery_job" in hass.data[DOMAIN][entry.entry_id]:
+            hass.data[DOMAIN][entry.entry_id]["discovery_job"]()
+        
+        # Отключаем менеджер
+        if DATA_ASTERISK_MANAGER in hass.data[DOMAIN][entry.entry_id]:
+            manager = hass.data[DOMAIN][entry.entry_id][DATA_ASTERISK_MANAGER]
+            await hass.async_add_executor_job(manager.disconnect)
     
     # Выгружаем платформы
     unload_ok = await hass.config_entries.async_unload_platforms(
         entry, PLATFORMS
     )
     
-    if unload_ok:
-        hass.data[DOMAIN].pop(entry.entry_id)
+    if unload_ok and DOMAIN in hass.data:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
     
     return unload_ok

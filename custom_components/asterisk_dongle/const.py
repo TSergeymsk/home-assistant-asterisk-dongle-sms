@@ -13,7 +13,7 @@ CONF_SCAN_INTERVAL: Final = "scan_interval"
 # Значения по умолчанию
 DEFAULT_PORT: Final = 5038
 DEFAULT_SCAN_INTERVAL: Final = 60
-DISCOVERY_INTERVAL: Final = 3600  # 1 час
+DISCOVERY_INTERVAL: Final = 300  # 5 минут вместо 1 часа для лучшего обнаружения
 
 # Ключи для hass.data
 DATA_ASTERISK_MANAGER: Final = "asterisk_manager"

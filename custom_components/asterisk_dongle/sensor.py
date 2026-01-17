@@ -8,9 +8,10 @@ from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers import device_registry as dr
 
 from .const import (
     DOMAIN,
@@ -38,18 +39,18 @@ async def async_setup_entry(
     # Создаем начальные сенсоры
     entities = []
     for imei, device_info in devices.items():
-        entities.append(
-            AsteriskDongleSignalSensor(
-                hass=hass,
-                manager=manager,
-                device_info=device_info,
-                entry_id=entry.entry_id
-            )
+        sensor = AsteriskDongleSignalSensor(
+            hass=hass,
+            manager=manager,
+            device_info=device_info,
+            entry_id=entry.entry_id
         )
+        entities.append(sensor)
     
-    async_add_entities(entities, update_before_add=False)
+    async_add_entities(entities, update_before_add=True)
     
     # Регистрируем обработчики для новых устройств
+    @callback
     async def async_add_sensor(device_info):
         """Добавить сенсор для нового устройства."""
         new_sensor = AsteriskDongleSignalSensor(
@@ -58,8 +59,18 @@ async def async_setup_entry(
             device_info=device_info,
             entry_id=entry.entry_id
         )
-        async_add_entities([new_sensor])
-        _LOGGER.debug("Added new sensor for device: %s", device_info[ATTR_IMEI])
+        async_add_entities([new_sensor], update_before_add=True)
+        _LOGGER.info("Added new sensor for device: %s", device_info[ATTR_IMEI])
+    
+    @callback
+    def async_remove_sensor(imei):
+        """Удалить сенсор для устройства."""
+        # Находим и удаляем сущность
+        for entity in entities:
+            if hasattr(entity, '_attr_unique_id') and imei in entity.unique_id:
+                hass.async_create_task(entity.async_remove())
+                _LOGGER.info("Removed sensor for device: %s", imei)
+                break
     
     # Подписываемся на сигналы
     async_dispatcher_connect(
@@ -67,12 +78,19 @@ async def async_setup_entry(
         f"{SIGNAL_DEVICE_DISCOVERED}_{entry.entry_id}",
         async_add_sensor
     )
+    
+    async_dispatcher_connect(
+        hass,
+        f"{SIGNAL_DEVICE_REMOVED}_{entry.entry_id}",
+        async_remove_sensor
+    )
 
 
 class AsteriskDongleSignalSensor(SensorEntity):
     """Сенсор уровня сигнала dongle."""
     
     _attr_has_entity_name = True
+    _attr_icon = "mdi:signal"
     
     def __init__(
         self,
@@ -88,11 +106,12 @@ class AsteriskDongleSignalSensor(SensorEntity):
         self._entry_id = entry_id
         
         # Уникальный ID
-        self._attr_unique_id = f"{entry_id}_{device_info[ATTR_IMEI]}_signal"
+        imei = device_info[ATTR_IMEI]
+        self._attr_unique_id = f"{entry_id}_{imei}_signal"
         
         # Имя сенсора
-        imei_short = device_info[ATTR_IMEI][-6:]
-        self._attr_name = f"Cell Signal {imei_short}"
+        dongle_id = device_info[ATTR_DONGLE_ID]
+        self._attr_name = f"Signal Strength {dongle_id}"
         
         # Атрибуты сенсора
         self._attr_device_class = "signal_strength"
@@ -110,9 +129,12 @@ class AsteriskDongleSignalSensor(SensorEntity):
     @property
     def device_info(self):
         """Возвращает информацию об устройстве."""
+        imei = self._device_info[ATTR_IMEI]
+        dongle_id = self._device_info[ATTR_DONGLE_ID]
+        
         return {
-            "identifiers": {(DOMAIN, self._device_info[ATTR_IMEI])},
-            "name": f"Dongle {self._device_info[ATTR_DONGLE_ID]}",
+            "identifiers": {(DOMAIN, imei)},
+            "name": f"Dongle {dongle_id}",
             "manufacturer": self._device_info.get("model", "Unknown"),
             "model": self._device_info.get("model", "Unknown"),
             "sw_version": self._device_info.get("firmware", "Unknown"),
@@ -127,6 +149,8 @@ class AsteriskDongleSignalSensor(SensorEntity):
             "imei": self._device_info[ATTR_IMEI],
             "dongle_id": self._device_info[ATTR_DONGLE_ID],
             "last_update": self._last_update,
+            "provider": self._device_info.get("provider", ""),
+            "state": self._device_info.get("state", ""),
         })
         return attrs
 
@@ -139,13 +163,15 @@ class AsteriskDongleSignalSensor(SensorEntity):
         """Обновление данных сенсора."""
         try:
             # Получаем детальную информацию о донгле
-            command = f"dongle show device state {self._device_info[ATTR_DONGLE_ID]}"
+            dongle_id = self._device_info[ATTR_DONGLE_ID]
+            command = f"dongle show device state {dongle_id}"
             response = await self.hass.async_add_executor_job(
                 self._manager.send_command, command
             )
             
             if not response:
                 self._available = False
+                _LOGGER.warning("No response for device %s", dongle_id)
                 return
             
             # Парсим ответ
@@ -157,27 +183,19 @@ class AsteriskDongleSignalSensor(SensorEntity):
             
             # Извлекаем уровень сигнала
             rssi_str = data.get("rssi", "")
-            match = re.search(r"(-?\d+)\s*dBm", rssi_str)
-            if match:
-                self._attr_native_value = int(match.group(1))
-            else:
-                match_raw = re.search(r"(\d+)\s*,\s*", rssi_str)
-                if match_raw:
-                    raw_value = int(match_raw.group(1))
-                    self._attr_native_value = (raw_value * 2) - 113
-                else:
-                    self._attr_native_value = None
+            signal_value = self._extract_signal_value(rssi_str)
+            self._attr_native_value = signal_value
             
             # Сохраняем атрибуты
             self._attributes = {
                 "raw_rssi": rssi_str,
-                "provider": data.get("provider_name", ""),
+                "provider": data.get("provider_name", self._device_info.get("provider", "")),
                 "registration": data.get("gsm_registration_status", ""),
-                "network_mode": data.get("mode", ""),
-                "submode": data.get("submode", ""),
+                "network_mode": data.get("mode", self._device_info.get("mode", "")),
+                "submode": data.get("submode", self._device_info.get("submode", "")),
                 "lac": data.get("location_area_code", ""),
                 "cell_id": data.get("cell_id", ""),
-                "signal_quality": self._calculate_signal_quality(self._attr_native_value),
+                "signal_quality": self._calculate_signal_quality(signal_value),
             }
             
             self._last_update = datetime.now().isoformat()
@@ -185,8 +203,27 @@ class AsteriskDongleSignalSensor(SensorEntity):
             
         except Exception as e:
             _LOGGER.error("Error updating sensor for %s: %s", 
-                         self._device_info[ATTR_IMEI], str(e))
+                         self._device_info[ATTR_DONGLE_ID], str(e))
             self._available = False
+
+    def _extract_signal_value(self, rssi_str: str):
+        """Извлекает значение сигнала из строки."""
+        if not rssi_str:
+            return None
+        
+        # Пробуем извлечь значение в dBm
+        match = re.search(r"(-?\d+)\s*dBm", rssi_str)
+        if match:
+            return int(match.group(1))
+        
+        # Пробуем извлечь сырое значение (например: "31, -51 dBm")
+        match_raw = re.search(r"(\d+)\s*,\s*", rssi_str)
+        if match_raw:
+            raw_value = int(match_raw.group(1))
+            # Конвертируем сырое значение в dBm
+            return (raw_value * 2) - 113
+        
+        return None
 
     def _parse_dongle_state(self, response):
         """Парсинг ответа от dongle."""
@@ -201,16 +238,14 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 in_output_block = True
                 continue
                 
-            if line == "" and in_output_block:
+            if line == "--END COMMAND--" or (line == "" and in_output_block):
                 in_output_block = False
                 continue
                 
-            if in_output_block and line.startswith("Output:"):
-                content = line[7:].strip()
-                if ":" in content:
-                    key, value = content.split(":", 1)
-                    key = key.strip().lower().replace(" ", "_")
-                    data[key] = value.strip()
+            if in_output_block and ":" in line:
+                key, value = line.split(":", 1)
+                key = key.strip().lower().replace(" ", "_")
+                data[key] = value.strip()
         
         return data
 
@@ -231,22 +266,3 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 return "Poor"
         except (ValueError, TypeError):
             return "Unknown"
-
-    @property
-    def icon(self):
-        """Возвращает иконку."""
-        if self._attr_native_value is None:
-            return "mdi:signal-off"
-        
-        try:
-            signal = int(self._attr_native_value)
-            if signal >= -70:
-                return "mdi:signal"
-            elif signal >= -85:
-                return "mdi:signal-2g"
-            elif signal >= -100:
-                return "mdi:signal-1g"
-            else:
-                return "mdi:signal-off"
-        except (ValueError, TypeError):
-            return "mdi:signal"
