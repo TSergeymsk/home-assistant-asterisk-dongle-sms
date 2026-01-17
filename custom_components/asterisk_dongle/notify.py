@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import voluptuous as vol
@@ -26,8 +27,11 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-# Service field names - target is for phone number (SMS) or USSD code (USSD)
+# Service field names
 ATTR_TARGET = "target"
+
+# USSD code pattern: starts with *, ends with #, can contain digits and *
+USSD_PATTERN = re.compile(r'^\*[\d\*]+\#$')
 
 
 async def async_setup_entry(
@@ -42,20 +46,20 @@ async def async_setup_entry(
 
     # Create services for existing devices
     for imei, device_info in devices.items():
-        await _create_dongle_services(hass, manager, device_info, entry.entry_id)
+        await _create_dongle_service(hass, manager, device_info, entry.entry_id)
 
     # Handlers for device updates
     @callback
     async def handle_device_discovered(device_info):
-        """Add services for new device."""
-        await _create_dongle_services(hass, manager, device_info, entry.entry_id)
-        _LOGGER.info("Added notify services for device: %s", device_info[ATTR_IMEI])
+        """Add service for new device."""
+        await _create_dongle_service(hass, manager, device_info, entry.entry_id)
+        _LOGGER.info("Added notify service for device: %s", device_info[ATTR_IMEI])
 
     @callback
     async def handle_device_removed(imei):
-        """Remove services for device."""
-        await _remove_dongle_services(hass, imei)
-        _LOGGER.info("Removed notify services for device: %s", imei)
+        """Remove service for device."""
+        await _remove_dongle_service(hass, imei)
+        _LOGGER.info("Removed notify service for device: %s", imei)
 
     # Subscribe to signals
     async_dispatcher_connect(
@@ -71,180 +75,155 @@ async def async_setup_entry(
     )
 
 
-async def _create_dongle_services(
+async def _create_dongle_service(
     hass: HomeAssistant, 
     manager, 
     device_info: dict[str, Any], 
     entry_id: str
 ):
-    """Create notification services for a dongle."""
+    """Create unified notification service for a dongle."""
     imei = device_info[ATTR_IMEI]
     dongle_id = device_info[ATTR_DONGLE_ID]
-    imei_short = imei[-6:] if len(imei) >= 6 else imei
     
-    # Service names
-    service_sms = f"asterisk_dongle_sms_{imei_short}"
-    service_ussd = f"asterisk_dongle_ussd_{imei_short}"
+    # Service name: notify.asterisk_<IMEI>
+    service_name = f"asterisk_{imei}"
 
-    # Different schemas for SMS and USSD
-    sms_schema = vol.Schema({
-        vol.Required(ATTR_TARGET): cv.string,  # Phone number
-        vol.Required(ATTR_MESSAGE): cv.string,  # SMS message
+    # Schema for the unified service
+    service_schema = vol.Schema({
+        vol.Required(ATTR_TARGET): cv.string,
+        vol.Required(ATTR_MESSAGE): cv.string,
     })
 
-    ussd_schema = vol.Schema({
-        vol.Required(ATTR_TARGET): cv.string,  # USSD code
-    })
-
-    # Register SMS service
-    async def async_sms_service(call: ServiceCall):
-        """Handle SMS sending."""
-        target = call.data.get(ATTR_TARGET)  # Phone number
-        message = call.data.get(ATTR_MESSAGE)  # SMS message
+    # Unified service handler
+    async def async_unified_service(call: ServiceCall):
+        """Handle unified SMS/USSD sending."""
+        target = call.data.get(ATTR_TARGET)
+        message = call.data.get(ATTR_MESSAGE)
 
         if not target:
-            _LOGGER.error("Target (phone number) is required for SMS")
+            _LOGGER.error("Target is required")
             return
         
-        if not message:
-            _LOGGER.error("Message is required for SMS")
-            return
+        # Check if target is a USSD code
+        is_ussd = USSD_PATTERN.match(target.strip())
+        
+        if is_ussd:
+            # USSD mode: target is USSD code, message is ignored
+            _LOGGER.debug("Detected USSD code: %s", target)
+            
+            # Log that we're ignoring message field
+            if message:
+                _LOGGER.debug("Ignoring message field for USSD: %s", message)
+            
+            # Create USSD command
+            command = f"dongle ussd {dongle_id} {target}"
+            _LOGGER.debug("Sending USSD command: %s", command)
 
-        # Create SMS command
-        command = f"dongle sms {dongle_id} {target} {message}"
-        _LOGGER.debug("Sending SMS command: %s", command)
+            response = await hass.async_add_executor_job(manager.send_command, command)
 
-        response = await hass.async_add_executor_job(manager.send_command, command)
+            if not response:
+                _LOGGER.error("No response for USSD command to %s", dongle_id)
+                return
 
-        if not response:
-            _LOGGER.error("No response for SMS command to %s", dongle_id)
-            return
+            _LOGGER.debug("USSD command response: %s", response)
 
-        _LOGGER.debug("SMS command response: %s", response)
-
-        if "Response: Error" in response:
-            error_msg = "Unknown error"
-            for line in response.split('\n'):
-                if 'Message:' in line:
-                    error_msg = line.split('Message:', 1)[1].strip()
-                    break
-            _LOGGER.error("Failed to send SMS via %s: %s", dongle_id, error_msg)
+            if "Response: Error" in response:
+                error_msg = "Unknown error"
+                for line in response.split('\n'):
+                    if 'Message:' in line:
+                        error_msg = line.split('Message:', 1)[1].strip()
+                        break
+                _LOGGER.error("Failed to send USSD via %s: %s", dongle_id, error_msg)
+            else:
+                _LOGGER.info("USSD request sent via %s: %s", dongle_id, target)
+        
         else:
-            _LOGGER.info("SMS sent to %s via %s", target, dongle_id)
+            # SMS mode: target is phone number, message is SMS text
+            _LOGGER.debug("Detected phone number: %s", target)
+            
+            if not message:
+                _LOGGER.error("Message is required for SMS")
+                return
 
-    # Register USSD service
-    async def async_ussd_service(call: ServiceCall):
-        """Handle USSD sending."""
-        target = call.data.get(ATTR_TARGET)  # USSD code
+            # Create SMS command
+            command = f"dongle sms {dongle_id} {target} {message}"
+            _LOGGER.debug("Sending SMS command: %s", command)
 
-        if not target:
-            _LOGGER.error("Target (USSD code) is required for USSD")
-            return
+            response = await hass.async_add_executor_job(manager.send_command, command)
 
-        # Create USSD command
-        command = f"dongle ussd {dongle_id} {target}"
-        _LOGGER.debug("Sending USSD command: %s", command)
+            if not response:
+                _LOGGER.error("No response for SMS command to %s", dongle_id)
+                return
 
-        response = await hass.async_add_executor_job(manager.send_command, command)
+            _LOGGER.debug("SMS command response: %s", response)
 
-        if not response:
-            _LOGGER.error("No response for USSD command to %s", dongle_id)
-            return
+            if "Response: Error" in response:
+                error_msg = "Unknown error"
+                for line in response.split('\n'):
+                    if 'Message:' in line:
+                        error_msg = line.split('Message:', 1)[1].strip()
+                        break
+                _LOGGER.error("Failed to send SMS via %s: %s", dongle_id, error_msg)
+            else:
+                _LOGGER.info("SMS sent to %s via %s", target, dongle_id)
 
-        _LOGGER.debug("USSD command response: %s", response)
-
-        if "Response: Error" in response:
-            error_msg = "Unknown error"
-            for line in response.split('\n'):
-                if 'Message:' in line:
-                    error_msg = line.split('Message:', 1)[1].strip()
-                    break
-            _LOGGER.error("Failed to send USSD via %s: %s", dongle_id, error_msg)
-        else:
-            _LOGGER.info("USSD request sent via %s: %s", dongle_id, target)
-
-    # Register services in Home Assistant with different schemas
+    # Register service in Home Assistant
     hass.services.async_register(
         domain="notify",
-        service=service_sms,
-        service_func=async_sms_service,
-        schema=sms_schema,
+        service=service_name,
+        service_func=async_unified_service,
+        schema=service_schema,
     )
 
-    hass.services.async_register(
-        domain="notify",
-        service=service_ussd,
-        service_func=async_ussd_service,
-        schema=ussd_schema,
-    )
-
-    # Set service schemas for UI display
-    ui_sms_schema = {
-        "description": f"Send SMS via {dongle_id} ({imei_short})",
+    # Set service schema for UI display
+    ui_schema = {
+        "description": f"Send SMS or USSD via {dongle_id} (IMEI: {imei})",
         "fields": {
             ATTR_TARGET: {
-                "name": "Phone Number",
-                "description": "Phone number to send SMS to",
+                "name": "Target",
+                "description": "Phone number for SMS or USSD code (e.g., *100#) for USSD",
                 "required": True,
                 "selector": {"text": {}}
             },
             ATTR_MESSAGE: {
                 "name": "Message",
-                "description": "Text of the SMS message",
+                "description": "Text of the SMS message (ignored for USSD)",
                 "required": True,
                 "selector": {"text": {}}
             }
         }
     }
 
-    ui_ussd_schema = {
-        "description": f"Send USSD request via {dongle_id} ({imei_short})",
-        "fields": {
-            ATTR_TARGET: {
-                "name": "USSD Code",
-                "description": "USSD code to send (e.g., *100#, *102#)",
-                "required": True,
-                "selector": {"text": {}}
-            }
-        }
-    }
-
-    # Explicitly set schemas for BOTH services
-    await async_set_service_schema(hass, "notify", service_sms, ui_sms_schema)
-    await async_set_service_schema(hass, "notify", service_ussd, ui_ussd_schema)
+    # Explicitly set schema for UI
+    await async_set_service_schema(hass, "notify", service_name, ui_schema)
 
     # Save service information for removal
     if "notify_services" not in hass.data[DOMAIN][entry_id]:
         hass.data[DOMAIN][entry_id]["notify_services"] = {}
     
-    hass.data[DOMAIN][entry_id]["notify_services"][imei] = {
-        "sms": service_sms,
-        "ussd": service_ussd
-    }
+    hass.data[DOMAIN][entry_id]["notify_services"][imei] = service_name
 
-    _LOGGER.info("Created notify services for device %s (IMEI: %s)", dongle_id, imei)
+    _LOGGER.info("Created unified notify service for device %s: %s", dongle_id, service_name)
 
 
-async def _remove_dongle_services(hass: HomeAssistant, imei: str):
-    """Remove notification services for a device."""
+async def _remove_dongle_service(hass: HomeAssistant, imei: str):
+    """Remove notification service for a device."""
     # Find entry_id for this device
     for entry_id in hass.data.get(DOMAIN, {}):
         entry_data = hass.data[DOMAIN].get(entry_id, {})
         if "notify_services" in entry_data and imei in entry_data["notify_services"]:
-            services = entry_data["notify_services"][imei]
+            service_name = entry_data["notify_services"][imei]
             
             try:
-                # Remove SMS service
-                hass.services.async_remove("notify", services["sms"])
-                # Remove USSD service
-                hass.services.async_remove("notify", services["ussd"])
+                # Remove service
+                hass.services.async_remove("notify", service_name)
                 
                 # Remove from list
                 del hass.data[DOMAIN][entry_id]["notify_services"][imei]
                 
-                _LOGGER.info("Removed notify services for device IMEI: %s", imei)
+                _LOGGER.info("Removed notify service for device IMEI: %s", imei)
             except (ValueError, KeyError) as err:
-                _LOGGER.warning("Error removing services for %s: %s", imei, err)
+                _LOGGER.warning("Error removing service for %s: %s", imei, err)
             break
 
 
@@ -254,5 +233,5 @@ async def async_unload_entry_notify(hass: HomeAssistant, entry: ConfigEntry):
         if "notify_services" in hass.data[DOMAIN][entry.entry_id]:
             services = hass.data[DOMAIN][entry.entry_id]["notify_services"]
             for imei in list(services.keys()):
-                await _remove_dongle_services(hass, imei)
+                await _remove_dongle_service(hass, imei)
         _LOGGER.info("All notify services for Asterisk Dongle unloaded")
