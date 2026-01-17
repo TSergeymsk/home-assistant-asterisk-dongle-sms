@@ -189,64 +189,64 @@ async def _create_dongle_device(hass: HomeAssistant, entry: ConfigEntry, device_
 
 
 def _parse_devices_response(response: str) -> list[dict[str, Any]]:
-    """Парсинг ответа 'dongle show devices'."""
+    """Парсинг ответа 'dongle show devices' из AMI."""
     devices = []
     lines = response.split('\n')
     in_output_block = False
-    header_found = False
 
     for line in lines:
         line = line.strip()
 
-        # 1. Ищем начало блока с данными
-        if not in_output_block and ("Command output follows" in line or "Output:" in line):
+        # 1. Находим начало блока с выводом команды
+        if not in_output_block and "Command output follows" in line:
             in_output_block = True
             continue
         if not in_output_block:
-            continue  # Пропускаем строки до блока с выводом команды
+            continue  # Пропускаем строки до начала вывода
 
-        # 2. Ищем строку-заголовок таблицы (начинается с "ID" и содержит "Group")
-        if not header_found and line.startswith("ID") and "Group" in line:
-            header_found = True
-            continue
+        # 2. Пропускаем строку-заголовок таблицы (первая строка после маркера начинается с 'Output: ID')
+        if line.startswith("Output: ID"):
+            continue  # Это заголовок таблицы, пропускаем
 
-        # 3. Пропускаем разделители и пустые строки
-        if line.startswith("---") or not line:
-            continue
-
-        # 4. Конец блока данных (AMI обычно добавляет пустую строку или маркер)
-        if line == "--END COMMAND--":
+        # 3. Конец блока данных (пустая строка или маркер конца)
+        if line == "" or line == "--END COMMAND--":
             break
 
-        # 5. Парсим строку с данными об устройстве
-        # Разделяем строку по пробелам, удаляя пустые элементы
-        parts = [part for part in line.split(' ') if part]
+        # 4. Парсим строки, которые начинаются с 'Output: ' (это строки с данными)
+        if line.startswith("Output: "):
+            # УДАЛЯЕМ префикс 'Output: ' перед обработкой
+            data_line = line[8:].strip()  # Убираем "Output: " и лишние пробелы
+            _LOGGER.debug("Parsing data line: %s", data_line)
 
-        # Проверяем, что строка содержит достаточно данных (минимум 10 полей, как в вашем примере)
-        if len(parts) >= 10:
-            try:
-                device = {
-                    ATTR_DONGLE_ID: parts[0],        # dongle0
-                    "group": parts[1],               # 0
-                    "state": parts[2],               # Free
-                    "rssi_raw": parts[3],            # 26
-                    "mode": parts[4],                # 3
-                    "submode": parts[5],             # 3
-                    "provider": parts[6],            # beeline
-                    "model": parts[7],               # E173
-                    "firmware": parts[8],            # 11.126.85.00.209
-                    ATTR_IMEI: parts[9],             # 357291041830484
-                    "imsi": parts[10] if len(parts) > 10 else "",          # 250997278767099
-                    "number": parts[11] if len(parts) > 11 else "Unknown", # Unknown
-                }
-                devices.append(device)
-                _LOGGER.debug("Successfully parsed device: %s", device[ATTR_DONGLE_ID])
-            except IndexError as e:
-                _LOGGER.warning("Error parsing line, not enough fields: %s. Error: %s", line, e)
-        else:
-            _LOGGER.warning("Skipping line, unexpected format (only %d parts): %s", len(parts), line)
+            # Разделяем строку на части, учитывая, что пробелов может быть много
+            # Используем split без аргументов, чтобы разделить по любым пробельным символам
+            parts = data_line.split()
+            
+            if len(parts) >= 10:
+                try:
+                    device = {
+                        ATTR_DONGLE_ID: parts[0],        # dongle0
+                        "group": parts[1],               # 0
+                        "state": parts[2],               # Free
+                        "rssi_raw": parts[3],            # 26
+                        "mode": parts[4],                # 3
+                        "submode": parts[5],             # 3
+                        "provider": parts[6],            # beeline
+                        "model": parts[7],               # E173
+                        "firmware": parts[8],            # 11.126.85.00.209
+                        ATTR_IMEI: parts[9],             # 357291041830484
+                        "imsi": parts[10] if len(parts) > 10 else "",          # 250997278767099
+                        "number": parts[11] if len(parts) > 11 else "Unknown", # Unknown
+                    }
+                    devices.append(device)
+                    _LOGGER.debug("Successfully parsed device: %s (IMEI: %s)", 
+                                 device[ATTR_DONGLE_ID], device[ATTR_IMEI])
+                except IndexError as e:
+                    _LOGGER.warning("Error parsing line '%s': %s", data_line, e)
+            else:
+                _LOGGER.warning("Skipping line '%s', not enough fields (%d)", data_line, len(parts))
 
-    _LOGGER.info("Parsed %d devices from response", len(devices))
+    _LOGGER.info("Successfully parsed %d device(s) from AMI response", len(devices))
     return devices
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
