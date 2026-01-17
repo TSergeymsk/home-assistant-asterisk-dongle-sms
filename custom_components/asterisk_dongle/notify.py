@@ -100,8 +100,9 @@ async def _create_dongle_services(
             _LOGGER.error("Message is required for SMS")
             return
 
-        # Создаем команду для отправки SMS
-        command = f"dongle sms {dongle_id} {number} {shlex.quote(message)}"
+        # УБИРАЕМ shlex.quote() - AMI сам обрабатывает аргументы
+        # Если сообщение содержит пробелы, Asterisk примет его как один аргумент
+        command = f"dongle sms {dongle_id} {number} {message}"
         _LOGGER.debug("Sending SMS command: %s", command)
 
         response = await hass.async_add_executor_job(manager.send_command, command)
@@ -174,6 +175,7 @@ async def _create_dongle_services(
     )
 
     # Устанавливаем схемы сервисов для отображения в UI
+    # ОБА сервиса получают схему!
     sms_schema = {
         "description": f"Send SMS via {dongle_id} ({imei_short})",
         "fields": {
@@ -204,6 +206,7 @@ async def _create_dongle_services(
         }
     }
 
+    # Явно устанавливаем схемы для ОБОИХ сервисов
     await async_set_service_schema(hass, "notify", service_sms, sms_schema)
     await async_set_service_schema(hass, "notify", service_ussd, ussd_schema)
 
