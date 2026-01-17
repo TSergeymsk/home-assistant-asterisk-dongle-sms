@@ -140,7 +140,7 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 return
             
             # Отладочный вывод сырого ответа
-            _LOGGER.debug("Raw AMI response (first 300 chars): %s", response[:300])
+            _LOGGER.debug("Raw AMI response (first 500 chars): %s", response[:500])
             
             # Парсим ответ
             data = self._parse_dongle_state(response)
@@ -180,10 +180,16 @@ class AsteriskDongleSignalSensor(SensorEntity):
                     self._state = None
                     self._unit_of_measurement = None
             
-            # Сохраняем другие атрибуты
+            # Рассчитываем качество сигнала и иконку
+            signal_quality = self._calculate_signal_quality(self._state)
+            signal_icon = self._get_signal_icon(self._state)
+            
+            # Сохраняем атрибуты
             self._attributes = {
                 "device": self._dongle,
                 "raw_rssi": rssi_str,
+                "signal_quality": signal_quality,
+                "signal_icon": signal_icon,
                 "device_state": data.get("state", ""),
                 "provider": data.get("provider_name", ""),
                 "registration": data.get("gsm_registration_status", ""),
@@ -199,6 +205,10 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 "data_port": data.get("data", ""),
                 "voice_support": data.get("voice", ""),
                 "sms_support": data.get("sms", ""),
+                "manufacturer": data.get("manufacturer", ""),
+                "subscriber_number": data.get("subscriber_number", ""),
+                "call_waiting": data.get("call_waiting", ""),
+                "sms_service_center": data.get("sms_service_center", ""),
             }
             
             self._available = True
@@ -227,7 +237,7 @@ class AsteriskDongleSignalSensor(SensorEntity):
                 
             # Конец блока данных (пустая строка после блока)
             if line == "" and in_output_block:
-                # Можно break, если хотим только первый блок
+                # Не прерываемся, могут быть другие блоки
                 in_output_block = False
                 continue
                 
@@ -240,6 +250,42 @@ class AsteriskDongleSignalSensor(SensorEntity):
                     data[key] = value.strip()
         
         return data
+
+    def _calculate_signal_quality(self, signal_db):
+        """Calculate signal quality from dBm value."""
+        if signal_db is None:
+            return "Нет данных"
+        
+        try:
+            signal = int(signal_db)
+            if signal >= -70:
+                return "Отличный"
+            elif signal >= -85:
+                return "Хороший"
+            elif signal >= -100:
+                return "Слабый"
+            else:
+                return "Очень слабый"
+        except (ValueError, TypeError):
+            return "Неизвестно"
+
+    def _get_signal_icon(self, signal_db):
+        """Get appropriate icon for signal level."""
+        if signal_db is None:
+            return "mdi:signal-off"
+        
+        try:
+            signal = int(signal_db)
+            if signal >= -70:
+                return "mdi:signal-cellular-3"
+            elif signal >= -85:
+                return "mdi:signal-cellular-2"
+            elif signal >= -100:
+                return "mdi:signal-cellular-1"
+            else:
+                return "mdi:signal-off"
+        except (ValueError, TypeError):
+            return "mdi:signal"
 
     @property
     def icon(self):
