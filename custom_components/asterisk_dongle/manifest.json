@@ -1,0 +1,12 @@
+{
+  "domain": "asterisk_dongle_sms",
+  "name": "Asterisk Dongle SMS/USSD",
+  "documentation": "https://github.com/TSergeymsk/home-assistant-padavan-tracker",
+  "dependencies": [],
+  "requirements": ["asterisk-ami==0.1.0"],
+  "codeowners": ["@PaulAnnekov"],
+  "version": "1.1.0",
+  "config_flow": false,
+  "iot_class": "local_polling",
+  "platforms": ["notify", "sensor"]
+}
