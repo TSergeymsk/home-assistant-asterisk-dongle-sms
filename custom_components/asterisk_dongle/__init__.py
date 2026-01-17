@@ -138,7 +138,7 @@ async def _discover_devices(hass: HomeAssistant, entry: ConfigEntry):
                 
             new_devices[imei] = device
             
-            # Если устройство новое - отправляем сигнал
+            # Если устройство новое - создаем устройство и отправляем сигнал
             if imei not in current_devices:
                 _LOGGER.info("New device discovered: %s (IMEI: %s, Model: %s)", 
                            dongle_id, imei, device.get("model", "Unknown"))
@@ -177,18 +177,16 @@ async def _create_dongle_device(hass: HomeAssistant, entry: ConfigEntry, device_
     
     imei = device_info[ATTR_IMEI]
     
-    # Определяем производителя по модели
-    model = device_info.get("model", "").upper()
-    
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
         identifiers={(DOMAIN, imei)},
-        name=f"Dongle {imei}",  # Имя устройства: Dongle <IMEI>
-        manufacturer = device_info.get("manufacturer", "Unknown"),
+        name=f"Dongle {imei}",
+        manufacturer=device_info.get("manufacturer", "Unknown"),
         model=device_info.get("model", "Unknown"),
         sw_version=device_info.get("firmware", "Unknown"),
         via_device=(DOMAIN, entry.entry_id),
     )
+
 
 def _parse_devices_response(response: str) -> list[dict[str, Any]]:
     """Парсинг ответа 'dongle show devices' из AMI."""
@@ -251,6 +249,7 @@ def _parse_devices_response(response: str) -> list[dict[str, Any]]:
     _LOGGER.info("Successfully parsed %d device(s) from AMI response", len(devices))
     return devices
 
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Выгрузка конфигурационной записи."""
     # Останавливаем discovery
@@ -267,6 +266,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(
         entry, PLATFORMS
     )
+    
+    # Выгружаем notify сервисы
+    if "notify" in PLATFORMS:
+        from .notify import async_unload_entry_notify
+        await async_unload_entry_notify(hass, entry)
     
     if unload_ok and DOMAIN in hass.data:
         hass.data[DOMAIN].pop(entry.entry_id, None)

@@ -36,3 +36,12 @@ PLATFORM_SENSOR: Final = "sensor"
 # Типы сервисов notify
 SERVICE_SMS: Final = "sms"
 SERVICE_USSD: Final = "ussd"
+
+# Типы сервисов notify
+SERVICE_SMS: Final = "sms"
+SERVICE_USSD: Final = "ussd"
+
+# Ключи для данных сервиса
+ATTR_NUMBER: Final = "number"
+ATTR_MESSAGE: Final = "message"
+ATTR_USSD_CODE: Final = "ussd_code"
