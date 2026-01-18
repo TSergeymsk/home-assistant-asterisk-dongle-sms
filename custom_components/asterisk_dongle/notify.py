@@ -1,7 +1,6 @@
 """Platform for notify integration."""
 from __future__ import annotations
 
-import asyncio
 import logging
 import re
 from typing import Any
@@ -195,19 +194,8 @@ async def _create_dongle_service(
         }
     }
 
-    # Безопасно устанавливаем схему для UI
-    try:
-        # Проверяем, что функция доступна
-        if async_set_service_schema:
-            # Проверяем, что результат - корутина
-            result = async_set_service_schema(hass, "notify", service_name, ui_schema)
-            if asyncio.iscoroutine(result):
-                await result
-            else:
-                _LOGGER.debug("async_set_service_schema returned non-coroutine")
-    except (ImportError, AttributeError, TypeError) as e:
-        _LOGGER.debug("Service schema setup skipped: %s", e)
-        # Не критично, продолжаем без схемы
+    # Explicitly set schema for UI
+    await async_set_service_schema(hass, "notify", service_name, ui_schema)
 
     # Save service information for removal
     if "notify_services" not in hass.data[DOMAIN][entry_id]:
