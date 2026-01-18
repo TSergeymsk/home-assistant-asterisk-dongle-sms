@@ -80,8 +80,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass, _async_discovery, timedelta(seconds=DISCOVERY_INTERVAL)
     )
     
-    # Загружаем платформы
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # Загружаем платформы с обработкой ошибок
+    for platform in PLATFORMS:
+        try:
+            await hass.config_entries.async_forward_entry_setup(entry, platform)
+            _LOGGER.info("Platform %s loaded successfully", platform)
+        except Exception as e:
+            _LOGGER.error("Error setting up platform %s: %s", platform, e)
+            # Продолжаем с другими платформами
+            continue
     
     return True
 
@@ -267,10 +274,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         entry, PLATFORMS
     )
     
-    # Выгружаем notify сервисы
-    if "notify" in PLATFORMS:
+    # Выгружаем notify сервисы (если они были загружены)
+    try:
         from .notify import async_unload_entry_notify
         await async_unload_entry_notify(hass, entry)
+    except ImportError:
+        _LOGGER.debug("Notify platform not loaded, skipping unload")
+    except Exception as e:
+        _LOGGER.error("Error unloading notify services: %s", e)
     
     if unload_ok and DOMAIN in hass.data:
         hass.data[DOMAIN].pop(entry.entry_id, None)
