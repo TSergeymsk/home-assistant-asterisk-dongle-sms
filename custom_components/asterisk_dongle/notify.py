@@ -194,8 +194,8 @@ async def _create_dongle_service(
         }
     }
 
-    # Explicitly set schema for UI
-    await async_set_service_schema(hass, "notify", service_name, ui_schema)
+    # Set service schema (synchronous call)
+    async_set_service_schema(hass, "notify", service_name, ui_schema)
 
     # Save service information for removal
     if "notify_services" not in hass.data[DOMAIN][entry_id]:
